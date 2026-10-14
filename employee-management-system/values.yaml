@@ -47,10 +47,10 @@ configMap:
 secret:
   name: mysql-secret
   data:
-    MYSQL_ROOT_PASSWORD: "cm9vdDEyMw=="
-    MYSQL_DATABASE: "ZW1wbG95ZWVfZGI="
-    MYSQL_USER: "ZW1wbG95ZWVfdXNlcg=="
-    MYSQL_PASSWORD: "ZW1wbG95ZWUxMjM="
+    MYSQL_ROOT_PASSWORD: "rootpassword"
+    MYSQL_DATABASE: "employee_db"
+    MYSQL_USER: "employee_user"
+    MYSQL_PASSWORD: "employee123"
 
 storageClass:
   name: ebs-gp3
