@@ -1,9 +1,9 @@
 
 frontend:
   name: frontend
-  replicas: 2
-  image: docker.io/achalpadol/employee-frontend
-  tag: v2
+  replicas: 1
+  image: ""
+  tag: ""
   containerPort: 80
   service:
     name: frontend-service
@@ -12,9 +12,9 @@ frontend:
 
 backend:
   name: backend
-  replicas: 2
-  image: docker.io/payalkharat/kubernetes-ingress
-  tag: backend-v1
+  replicas: 1
+  image: ""
+  tag: ""
   containerPort: 5000
   configMapName: employee-cm
   secretName: mysql-secret
@@ -26,8 +26,8 @@ backend:
 mysql:
   name: mysql
   replicas: 1
-  image: docker.io/payalkharat/kubernetes-ingress
-  tag: v1 
+  image: ""
+  tag: "" 
   containerPort: 3306
   secretName: mysql-secret
   persistence:
@@ -40,7 +40,7 @@ mysql:
 
 configMap:
   name: employee-cm
-  stringData:
+  data:
     DB_HOST: mysql
     DB_PORT: "3306"
 
