@@ -23,7 +23,6 @@ variables:
   AWS_REGION: 'us-east-1'
   AWS_ACCOUNT_ID: '552940445807'
   ECR_REGISTRY: '552940445807.dkr.ecr.us-east-1.amazonaws.com'
-  AWS_SERVICE_CONNECTION: 'AWS-EKS-DEV'
   K8S_NAMESPACE: '${{ parameters.DEPLOY_ENV }}'
   HELM_RELEASE: 'employee-management-system'
   HELM_CHART_PATH: 'employee-management-system'
@@ -41,30 +40,27 @@ stages:
         steps:
           - checkout: self
 
-          - task: AWSShellScript@1
+          - task: Bash@3
             displayName: Build and Push DB Image to Dev ECR
             name: setTag
             inputs:
-              awsCredentials: 'AWS-EKS-DEV'
-              regionName: 'us-east-1'
-              scriptType: inline
-              inlineScript: |
+              targetType: inline
+              script: |
                 set -euo pipefail
 
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 REPOSITORY="employee-mgm-dev-db"
                 COMMIT_ID="$(git rev-parse --short HEAD)"
                 IMAGE_TAG="DEV-${COMMIT_ID}-$(Build.BuildId)"
 
-                echo "Building image: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
-
                 aws sts get-caller-identity
 
                 aws ecr describe-repositories \
                   --repository-names "${REPOSITORY}" \
-                  --region "$(AWS_REGION)"
+                  --region "${AWS_DEFAULT_REGION}"
 
-                aws ecr get-login-password --region "$(AWS_REGION)" | \
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
                 docker build \
@@ -85,16 +81,15 @@ stages:
       - job: Promote
         displayName: Promote Image to QA
         steps:
-          - task: AWSShellScript@1
+          - task: Bash@3
             displayName: Copy Dev Image to QA ECR
             name: setQATag
             inputs:
-              awsCredentials: 'AWS-EKS-DEV'
-              regionName: 'us-east-1'
-              scriptType: inline
-              inlineScript: |
+              targetType: inline
+              script: |
                 set -euo pipefail
 
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 SOURCE_REPOSITORY="employee-mgm-dev-db"
                 TARGET_REPOSITORY="employee-mgm-qa-db"
@@ -112,7 +107,9 @@ stages:
 
                 TARGET_TAG="QA-${SOURCE_TAG}"
 
-                aws ecr get-login-password --region "$(AWS_REGION)" | \
+                aws sts get-caller-identity
+
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
@@ -131,16 +128,15 @@ stages:
       - job: Promote
         displayName: Promote Image to UAT
         steps:
-          - task: AWSShellScript@1
+          - task: Bash@3
             displayName: Copy QA Image to UAT ECR
             name: setUATTag
             inputs:
-              awsCredentials: 'AWS-EKS-DEV'
-              regionName: 'us-east-1'
-              scriptType: inline
-              inlineScript: |
+              targetType: inline
+              script: |
                 set -euo pipefail
 
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 SOURCE_REPOSITORY="employee-mgm-qa-db"
                 TARGET_REPOSITORY="employee-mgm-uat-db"
@@ -154,7 +150,9 @@ stages:
                 SOURCE_QA_TAG="QA-${SOURCE_TAG}"
                 TARGET_TAG="UAT-${SOURCE_TAG}"
 
-                aws ecr get-login-password --region "$(AWS_REGION)" | \
+                aws sts get-caller-identity
+
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_QA_TAG}"
@@ -195,16 +193,15 @@ stages:
       - job: Promote
         displayName: Promote Image to Production
         steps:
-          - task: AWSShellScript@1
+          - task: Bash@3
             displayName: Copy UAT Image to PROD ECR
             name: setPRODTag
             inputs:
-              awsCredentials: 'AWS-EKS-DEV'
-              regionName: 'us-east-1'
-              scriptType: inline
-              inlineScript: |
+              targetType: inline
+              script: |
                 set -euo pipefail
 
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 SOURCE_REPOSITORY="employee-mgm-uat-db"
                 TARGET_REPOSITORY="employee-mgm-prod-db"
@@ -218,7 +215,9 @@ stages:
                 SOURCE_UAT_TAG="UAT-${SOURCE_TAG}"
                 TARGET_TAG="PROD-${SOURCE_TAG}"
 
-                aws ecr get-login-password --region "$(AWS_REGION)" | \
+                aws sts get-caller-identity
+
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_UAT_TAG}"
@@ -257,15 +256,14 @@ stages:
         steps:
           - checkout: self
 
-          - task: AWSShellScript@1
+          - task: Bash@3
             displayName: Configure EKS and Deploy Helm Release
             inputs:
-              awsCredentials: 'AWS-EKS-DEV'
-              regionName: 'us-east-1'
-              scriptType: inline
-              inlineScript: |
+              targetType: inline
+              script: |
                 set -euo pipefail
 
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 ENVIRONMENT="${{ parameters.DEPLOY_ENV }}"
                 REGISTRY="$(ECR_REGISTRY)"
                 REPOSITORY="$(ECR_REPOSITORY)"
@@ -284,19 +282,18 @@ stages:
                   exit 1
                 fi
 
-                echo "Environment: ${ENVIRONMENT}"
-                echo "EKS cluster: ${CLUSTER_NAME}"
-                echo "Image: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+                aws sts get-caller-identity
 
                 aws eks describe-cluster \
                   --name "${CLUSTER_NAME}" \
-                  --region "$(AWS_REGION)"
+                  --region "${AWS_DEFAULT_REGION}"
 
                 aws eks update-kubeconfig \
                   --name "${CLUSTER_NAME}" \
-                  --region "$(AWS_REGION)"
+                  --region "${AWS_DEFAULT_REGION}"
 
                 kubectl get nodes
+
                 kubectl create namespace "${ENVIRONMENT}" \
                   --dry-run=client -o yaml | kubectl apply -f -
 
@@ -309,10 +306,6 @@ stages:
                   --set database.image.tag="${IMAGE_TAG}" \
                   --wait \
                   --timeout 10m
-
-                kubectl rollout status deployment \
-                  --namespace "${ENVIRONMENT}" \
-                  --timeout=5m
 
                 helm status "$(HELM_RELEASE)" --namespace "${ENVIRONMENT}"
                 kubectl get pods,svc -n "${ENVIRONMENT}"
