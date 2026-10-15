@@ -1,0 +1,318 @@
+
+trigger:
+  - main
+
+pr: none
+
+parameters:
+  - name: DEPLOY_ENV
+    displayName: Deployment Environment
+    type: string
+    default: dev
+    values:
+      - dev
+      - qa
+      - uat
+      - prod
+  - name: IMAGE_TAG
+    displayName: Existing DEV Image Tag (Required for QA, UAT and PROD)
+    type: string
+    default: ''
+
+variables:
+  AWS_REGION: 'us-east-1'
+  AWS_ACCOUNT_ID: '552940445807'
+  ECR_REGISTRY: '552940445807.dkr.ecr.us-east-1.amazonaws.com'
+  AWS_SERVICE_CONNECTION: 'AWS-EKS-DEV'
+  K8S_NAMESPACE: '${{ parameters.DEPLOY_ENV }}'
+  HELM_RELEASE: 'employee-management-system'
+  HELM_CHART_PATH: 'employee-management-system'
+
+pool:
+  name: AWS-EKS-Agents
+
+stages:
+  - stage: BuildDev
+    displayName: 'Dev - Build and Push DB Image'
+    condition: eq('${{ parameters.DEPLOY_ENV }}', 'dev')
+    jobs:
+      - job: BuildAndPush
+        displayName: Build DB Image
+        steps:
+          - checkout: self
+
+          - task: AWSShellScript@1
+            displayName: Build and Push DB Image to Dev ECR
+            name: setTag
+            inputs:
+              awsCredentials: 'AWS-EKS-DEV'
+              regionName: 'us-east-1'
+              scriptType: inline
+              inlineScript: |
+                set -euo pipefail
+
+                REGISTRY="$(ECR_REGISTRY)"
+                REPOSITORY="employee-mgm-dev-db"
+                COMMIT_ID="$(git rev-parse --short HEAD)"
+                IMAGE_TAG="DEV-${COMMIT_ID}-$(Build.BuildId)"
+
+                echo "Building image: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+
+                aws sts get-caller-identity
+
+                aws ecr describe-repositories \
+                  --repository-names "${REPOSITORY}" \
+                  --region "$(AWS_REGION)"
+
+                aws ecr get-login-password --region "$(AWS_REGION)" | \
+                  docker login --username AWS --password-stdin "${REGISTRY}"
+
+                docker build \
+                  -f ./db/Dockerfile \
+                  -t "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}" \
+                  ./db
+
+                docker push "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+
+                echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${IMAGE_TAG}"
+                echo "Dev image pushed: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+
+  - stage: PromoteQA
+    displayName: 'Promote DB Image - Dev to QA'
+    dependsOn: BuildDev
+    condition: and(not(failed()), not(canceled()), in('${{ parameters.DEPLOY_ENV }}', 'qa', 'uat', 'prod'))
+    jobs:
+      - job: Promote
+        displayName: Promote Image to QA
+        steps:
+          - task: AWSShellScript@1
+            displayName: Copy Dev Image to QA ECR
+            name: setQATag
+            inputs:
+              awsCredentials: 'AWS-EKS-DEV'
+              regionName: 'us-east-1'
+              scriptType: inline
+              inlineScript: |
+                set -euo pipefail
+
+                REGISTRY="$(ECR_REGISTRY)"
+                SOURCE_REPOSITORY="employee-mgm-dev-db"
+                TARGET_REPOSITORY="employee-mgm-qa-db"
+                SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+
+                if [ -z "${SOURCE_TAG}" ]; then
+                  echo "ERROR: Supply the existing DEV image tag in IMAGE_TAG."
+                  exit 1
+                fi
+
+                if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
+                  echo "ERROR: IMAGE_TAG must be a valid DEV image tag."
+                  exit 1
+                fi
+
+                TARGET_TAG="QA-${SOURCE_TAG}"
+
+                aws ecr get-login-password --region "$(AWS_REGION)" | \
+                  docker login --username AWS --password-stdin "${REGISTRY}"
+
+                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
+                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}" \
+                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
+                echo "QA image pushed: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+  - stage: PromoteUAT
+    displayName: 'Promote DB Image - QA to UAT'
+    dependsOn: PromoteQA
+    condition: and(not(failed()), not(canceled()), in('${{ parameters.DEPLOY_ENV }}', 'uat', 'prod'))
+    jobs:
+      - job: Promote
+        displayName: Promote Image to UAT
+        steps:
+          - task: AWSShellScript@1
+            displayName: Copy QA Image to UAT ECR
+            name: setUATTag
+            inputs:
+              awsCredentials: 'AWS-EKS-DEV'
+              regionName: 'us-east-1'
+              scriptType: inline
+              inlineScript: |
+                set -euo pipefail
+
+                REGISTRY="$(ECR_REGISTRY)"
+                SOURCE_REPOSITORY="employee-mgm-qa-db"
+                TARGET_REPOSITORY="employee-mgm-uat-db"
+                SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+
+                if [ -z "${SOURCE_TAG}" ]; then
+                  echo "ERROR: Supply the original DEV image tag in IMAGE_TAG."
+                  exit 1
+                fi
+
+                SOURCE_QA_TAG="QA-${SOURCE_TAG}"
+                TARGET_TAG="UAT-${SOURCE_TAG}"
+
+                aws ecr get-login-password --region "$(AWS_REGION)" | \
+                  docker login --username AWS --password-stdin "${REGISTRY}"
+
+                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_QA_TAG}"
+                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_QA_TAG}" \
+                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
+                echo "UAT image pushed: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+  - stage: ProductionApproval
+    displayName: 'Production - Manual Approval'
+    dependsOn: PromoteUAT
+    condition: and(not(failed()), not(canceled()), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
+    jobs:
+      - job: ManualApproval
+        displayName: Approve Production Deployment
+        pool: server
+        timeoutInMinutes: 1440
+        steps:
+          - task: ManualValidation@1
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: ''
+              approvers: ''
+              allowApproversToApproveTheirOwnRuns: true
+              instructions: |
+                Review the DB image before production promotion.
+                Original DEV image tag: ${{ parameters.IMAGE_TAG }}
+                Approve to continue with production promotion.
+              onTimeout: reject
+
+  - stage: PromotePROD
+    displayName: 'Promote DB Image - UAT to PROD'
+    dependsOn: ProductionApproval
+    condition: and(not(failed()), not(canceled()), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
+    jobs:
+      - job: Promote
+        displayName: Promote Image to Production
+        steps:
+          - task: AWSShellScript@1
+            displayName: Copy UAT Image to PROD ECR
+            name: setPRODTag
+            inputs:
+              awsCredentials: 'AWS-EKS-DEV'
+              regionName: 'us-east-1'
+              scriptType: inline
+              inlineScript: |
+                set -euo pipefail
+
+                REGISTRY="$(ECR_REGISTRY)"
+                SOURCE_REPOSITORY="employee-mgm-uat-db"
+                TARGET_REPOSITORY="employee-mgm-prod-db"
+                SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+
+                if [ -z "${SOURCE_TAG}" ]; then
+                  echo "ERROR: Supply the original DEV image tag in IMAGE_TAG."
+                  exit 1
+                fi
+
+                SOURCE_UAT_TAG="UAT-${SOURCE_TAG}"
+                TARGET_TAG="PROD-${SOURCE_TAG}"
+
+                aws ecr get-login-password --region "$(AWS_REGION)" | \
+                  docker login --username AWS --password-stdin "${REGISTRY}"
+
+                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_UAT_TAG}"
+                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_UAT_TAG}" \
+                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
+                echo "Production image pushed: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+  - stage: DeployDB
+    displayName: 'Deploy DB using Helm on EKS'
+    dependsOn:
+      - BuildDev
+      - PromoteQA
+      - PromoteUAT
+      - ProductionApproval
+      - PromotePROD
+    condition: and(not(failed()), not(canceled()))
+    variables:
+      ${{ if eq(parameters.DEPLOY_ENV, 'dev') }}:
+        IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.BuildDev.BuildAndPush.outputs['setTag.IMAGE_TAG'] ]
+        ECR_REPOSITORY: 'employee-mgm-dev-db'
+      ${{ if eq(parameters.DEPLOY_ENV, 'qa') }}:
+        IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.PromoteQA.Promote.outputs['setQATag.IMAGE_TAG'] ]
+        ECR_REPOSITORY: 'employee-mgm-qa-db'
+      ${{ if eq(parameters.DEPLOY_ENV, 'uat') }}:
+        IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.PromoteUAT.Promote.outputs['setUATTag.IMAGE_TAG'] ]
+        ECR_REPOSITORY: 'employee-mgm-uat-db'
+      ${{ if eq(parameters.DEPLOY_ENV, 'prod') }}:
+        IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.PromotePROD.Promote.outputs['setPRODTag.IMAGE_TAG'] ]
+        ECR_REPOSITORY: 'employee-mgm-prod-db'
+    jobs:
+      - job: Deploy
+        displayName: Deploy DB with Helm
+        steps:
+          - checkout: self
+
+          - task: AWSShellScript@1
+            displayName: Configure EKS and Deploy Helm Release
+            inputs:
+              awsCredentials: 'AWS-EKS-DEV'
+              regionName: 'us-east-1'
+              scriptType: inline
+              inlineScript: |
+                set -euo pipefail
+
+                ENVIRONMENT="${{ parameters.DEPLOY_ENV }}"
+                REGISTRY="$(ECR_REGISTRY)"
+                REPOSITORY="$(ECR_REPOSITORY)"
+                IMAGE_TAG="$(IMAGE_TAG_TO_DEPLOY)"
+
+                case "${ENVIRONMENT}" in
+                  dev) CLUSTER_NAME="employee-mgm-dev-cluster" ;;
+                  qa) CLUSTER_NAME="employee-mgm-qa-cluster" ;;
+                  uat) CLUSTER_NAME="employee-mgm-uat-cluster" ;;
+                  prod) CLUSTER_NAME="employee-mgm-prod-cluster" ;;
+                  *) echo "ERROR: Unsupported environment ${ENVIRONMENT}"; exit 1 ;;
+                esac
+
+                if [ -z "${IMAGE_TAG}" ]; then
+                  echo "ERROR: Image tag was not produced. Check the earlier stages."
+                  exit 1
+                fi
+
+                echo "Environment: ${ENVIRONMENT}"
+                echo "EKS cluster: ${CLUSTER_NAME}"
+                echo "Image: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+
+                aws eks describe-cluster \
+                  --name "${CLUSTER_NAME}" \
+                  --region "$(AWS_REGION)"
+
+                aws eks update-kubeconfig \
+                  --name "${CLUSTER_NAME}" \
+                  --region "$(AWS_REGION)"
+
+                kubectl get nodes
+                kubectl create namespace "${ENVIRONMENT}" \
+                  --dry-run=client -o yaml | kubectl apply -f -
+
+                helm lint "$(HELM_CHART_PATH)"
+
+                helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
+                  --namespace "${ENVIRONMENT}" \
+                  --create-namespace \
+                  --set database.image.repository="${REGISTRY}/${REPOSITORY}" \
+                  --set database.image.tag="${IMAGE_TAG}" \
+                  --wait \
+                  --timeout 10m
+
+                kubectl rollout status deployment \
+                  --namespace "${ENVIRONMENT}" \
+                  --timeout=5m
+
+                helm status "$(HELM_RELEASE)" --namespace "${ENVIRONMENT}"
+                kubectl get pods,svc -n "${ENVIRONMENT}"
