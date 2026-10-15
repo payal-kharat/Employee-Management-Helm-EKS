@@ -31,7 +31,6 @@ pool:
   name: AWS-EKS-Agents
 
 stages:
-
   - stage: BuildDev
     displayName: 'Dev - Build and Push All Images'
     condition: eq('${{ parameters.DEPLOY_ENV }}', 'dev')
@@ -52,11 +51,14 @@ stages:
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 COMMIT_ID="$(git rev-parse --short HEAD)"
-                IMAGE_TAG="DEV-${COMMIT_ID}-$(Build.BuildId)"
+                IMAGE_TAG="DEV-${COMMIT_ID}"
+
+                echo "Commit ID: ${COMMIT_ID}"
+                echo "Image tag: ${IMAGE_TAG}"
 
                 aws sts get-caller-identity
 
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" |
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
                 build_push() {
@@ -68,7 +70,7 @@ stages:
                     exit 1
                   fi
 
-                  echo "Building ${REPOSITORY}:${IMAGE_TAG}"
+                  echo "Building ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
 
                   aws ecr describe-repositories \
                     --repository-names "${REPOSITORY}" \
@@ -86,7 +88,7 @@ stages:
                     --image-ids imageTag="${IMAGE_TAG}" \
                     --region "${AWS_DEFAULT_REGION}"
 
-                  echo "Verified image: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+                  echo "Verified: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
                 }
 
                 build_push "employee-mgm-dev-backend" "./backend"
@@ -94,22 +96,18 @@ stages:
                 build_push "employee-mgm-dev-db" "./db"
 
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${IMAGE_TAG}"
-                echo "##vso[task.setvariable variable=BACKEND_IMAGE;isOutput=true]${REGISTRY}/employee-mgm-dev-backend"
-                echo "##vso[task.setvariable variable=FRONTEND_IMAGE;isOutput=true]${REGISTRY}/employee-mgm-dev-frontend"
-                echo "##vso[task.setvariable variable=DB_IMAGE;isOutput=true]${REGISTRY}/employee-mgm-dev-db"
                 echo "All three images pushed and verified successfully."
 
-
   - stage: PromoteQA
-    displayName: 'Promote DB Image - Dev to QA'
+    displayName: 'Promote All Images - Dev to QA'
     dependsOn: BuildDev
     condition: and(not(failed()), not(canceled()), in('${{ parameters.DEPLOY_ENV }}', 'qa', 'uat', 'prod'))
     jobs:
       - job: Promote
-        displayName: Promote Image to QA
+        displayName: Promote Backend, Frontend and DB to QA
         steps:
           - task: Bash@3
-            displayName: Copy Dev Image to QA ECR
+            displayName: Copy Dev Images to QA ECR
             name: setQATag
             inputs:
               targetType: inline
@@ -118,45 +116,71 @@ stages:
 
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
-                SOURCE_REPOSITORY="employee-mgm-dev-db"
-                TARGET_REPOSITORY="employee-mgm-qa-db"
                 SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
 
                 if [ -z "${SOURCE_TAG}" ]; then
-                  echo "ERROR: Supply the existing DEV image tag in IMAGE_TAG."
+                  echo "ERROR: Supply the existing DEV image tag, for example DEV-3c25b00."
                   exit 1
                 fi
 
                 if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
-                  echo "ERROR: IMAGE_TAG must be a valid DEV image tag."
+                  echo "ERROR: IMAGE_TAG must start with DEV-."
                   exit 1
                 fi
 
-                TARGET_TAG="QA-${SOURCE_TAG}"
+                COMMIT_ID="${SOURCE_TAG#DEV-}"
+                TARGET_TAG="QA-${COMMIT_ID}"
 
                 aws sts get-caller-identity
 
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" |
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
-                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}" \
-                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                promote_image() {
+                  SOURCE_REPOSITORY="$1"
+                  TARGET_REPOSITORY="$2"
+
+                  SOURCE_IMAGE="${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
+                  TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                  aws ecr describe-images \
+                    --repository-name "${SOURCE_REPOSITORY}" \
+                    --image-ids imageTag="${SOURCE_TAG}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  aws ecr describe-repositories \
+                    --repository-names "${TARGET_REPOSITORY}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  docker pull "${SOURCE_IMAGE}"
+                  docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+                  docker push "${TARGET_IMAGE}"
+
+                  aws ecr describe-images \
+                    --repository-name "${TARGET_REPOSITORY}" \
+                    --image-ids imageTag="${TARGET_TAG}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  echo "Promoted: ${TARGET_IMAGE}"
+                }
+
+                promote_image "employee-mgm-dev-backend" "employee-mgm-qa-backend"
+                promote_image "employee-mgm-dev-frontend" "employee-mgm-qa-frontend"
+                promote_image "employee-mgm-dev-db" "employee-mgm-qa-db"
 
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
-                echo "QA image pushed: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                echo "All three QA images promoted successfully."
 
   - stage: PromoteUAT
-    displayName: 'Promote DB Image - QA to UAT'
+    displayName: 'Promote All Images - QA to UAT'
     dependsOn: PromoteQA
     condition: and(not(failed()), not(canceled()), in('${{ parameters.DEPLOY_ENV }}', 'uat', 'prod'))
     jobs:
       - job: Promote
-        displayName: Promote Image to UAT
+        displayName: Promote Backend, Frontend and DB to UAT
         steps:
           - task: Bash@3
-            displayName: Copy QA Image to UAT ECR
+            displayName: Copy QA Images to UAT ECR
             name: setUATTag
             inputs:
               targetType: inline
@@ -165,30 +189,56 @@ stages:
 
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
-                SOURCE_REPOSITORY="employee-mgm-qa-db"
-                TARGET_REPOSITORY="employee-mgm-uat-db"
                 SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
 
-                if [ -z "${SOURCE_TAG}" ]; then
-                  echo "ERROR: Supply the original DEV image tag in IMAGE_TAG."
+                if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
+                  echo "ERROR: Supply the original DEV tag, for example DEV-3c25b00."
                   exit 1
                 fi
 
-                SOURCE_QA_TAG="QA-${SOURCE_TAG}"
-                TARGET_TAG="UAT-${SOURCE_TAG}"
+                COMMIT_ID="${SOURCE_TAG#DEV-}"
+                SOURCE_QA_TAG="QA-${COMMIT_ID}"
+                TARGET_TAG="UAT-${COMMIT_ID}"
 
                 aws sts get-caller-identity
 
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" |
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
-                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_QA_TAG}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_QA_TAG}" \
-                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                promote_image() {
+                  SOURCE_REPOSITORY="$1"
+                  TARGET_REPOSITORY="$2"
+
+                  SOURCE_IMAGE="${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_QA_TAG}"
+                  TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                  aws ecr describe-images \
+                    --repository-name "${SOURCE_REPOSITORY}" \
+                    --image-ids imageTag="${SOURCE_QA_TAG}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  aws ecr describe-repositories \
+                    --repository-names "${TARGET_REPOSITORY}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  docker pull "${SOURCE_IMAGE}"
+                  docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+                  docker push "${TARGET_IMAGE}"
+
+                  aws ecr describe-images \
+                    --repository-name "${TARGET_REPOSITORY}" \
+                    --image-ids imageTag="${TARGET_TAG}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  echo "Promoted: ${TARGET_IMAGE}"
+                }
+
+                promote_image "employee-mgm-qa-backend" "employee-mgm-uat-backend"
+                promote_image "employee-mgm-qa-frontend" "employee-mgm-uat-frontend"
+                promote_image "employee-mgm-qa-db" "employee-mgm-uat-db"
 
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
-                echo "UAT image pushed: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                echo "All three UAT images promoted successfully."
 
   - stage: ProductionApproval
     displayName: 'Production - Manual Approval'
@@ -207,21 +257,21 @@ stages:
               approvers: ''
               allowApproversToApproveTheirOwnRuns: true
               instructions: |
-                Review the DB image before production promotion.
+                Review the backend, frontend and database images before production promotion.
                 Original DEV image tag: ${{ parameters.IMAGE_TAG }}
                 Approve to continue with production promotion.
               onTimeout: reject
 
   - stage: PromotePROD
-    displayName: 'Promote DB Image - UAT to PROD'
+    displayName: 'Promote All Images - UAT to PROD'
     dependsOn: ProductionApproval
     condition: and(not(failed()), not(canceled()), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
     jobs:
       - job: Promote
-        displayName: Promote Image to Production
+        displayName: Promote Backend, Frontend and DB to Production
         steps:
           - task: Bash@3
-            displayName: Copy UAT Image to PROD ECR
+            displayName: Copy UAT Images to PROD ECR
             name: setPRODTag
             inputs:
               targetType: inline
@@ -230,33 +280,59 @@ stages:
 
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
-                SOURCE_REPOSITORY="employee-mgm-uat-db"
-                TARGET_REPOSITORY="employee-mgm-prod-db"
                 SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
 
-                if [ -z "${SOURCE_TAG}" ]; then
-                  echo "ERROR: Supply the original DEV image tag in IMAGE_TAG."
+                if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
+                  echo "ERROR: Supply the original DEV tag, for example DEV-3c25b00."
                   exit 1
                 fi
 
-                SOURCE_UAT_TAG="UAT-${SOURCE_TAG}"
-                TARGET_TAG="PROD-${SOURCE_TAG}"
+                COMMIT_ID="${SOURCE_TAG#DEV-}"
+                SOURCE_UAT_TAG="UAT-${COMMIT_ID}"
+                TARGET_TAG="PROD-${COMMIT_ID}"
 
                 aws sts get-caller-identity
 
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" |
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
-                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_UAT_TAG}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_UAT_TAG}" \
-                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                promote_image() {
+                  SOURCE_REPOSITORY="$1"
+                  TARGET_REPOSITORY="$2"
+
+                  SOURCE_IMAGE="${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_UAT_TAG}"
+                  TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                  aws ecr describe-images \
+                    --repository-name "${SOURCE_REPOSITORY}" \
+                    --image-ids imageTag="${SOURCE_UAT_TAG}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  aws ecr describe-repositories \
+                    --repository-names "${TARGET_REPOSITORY}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  docker pull "${SOURCE_IMAGE}"
+                  docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+                  docker push "${TARGET_IMAGE}"
+
+                  aws ecr describe-images \
+                    --repository-name "${TARGET_REPOSITORY}" \
+                    --image-ids imageTag="${TARGET_TAG}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  echo "Promoted: ${TARGET_IMAGE}"
+                }
+
+                promote_image "employee-mgm-uat-backend" "employee-mgm-prod-backend"
+                promote_image "employee-mgm-uat-frontend" "employee-mgm-prod-frontend"
+                promote_image "employee-mgm-uat-db" "employee-mgm-prod-db"
 
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
-                echo "Production image pushed: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                echo "All three production images promoted successfully."
 
   - stage: DeployDB
-    displayName: 'Deploy DB using Helm on EKS'
+    displayName: 'Deploy Application using Helm on EKS'
     dependsOn:
       - BuildDev
       - PromoteQA
@@ -267,19 +343,15 @@ stages:
     variables:
       ${{ if eq(parameters.DEPLOY_ENV, 'dev') }}:
         IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.BuildDev.BuildAndPush.outputs['setTag.IMAGE_TAG'] ]
-        ECR_REPOSITORY: 'employee-mgm-dev-db'
       ${{ if eq(parameters.DEPLOY_ENV, 'qa') }}:
         IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.PromoteQA.Promote.outputs['setQATag.IMAGE_TAG'] ]
-        ECR_REPOSITORY: 'employee-mgm-qa-db'
       ${{ if eq(parameters.DEPLOY_ENV, 'uat') }}:
         IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.PromoteUAT.Promote.outputs['setUATTag.IMAGE_TAG'] ]
-        ECR_REPOSITORY: 'employee-mgm-uat-db'
       ${{ if eq(parameters.DEPLOY_ENV, 'prod') }}:
         IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.PromotePROD.Promote.outputs['setPRODTag.IMAGE_TAG'] ]
-        ECR_REPOSITORY: 'employee-mgm-prod-db'
     jobs:
       - job: Deploy
-        displayName: Deploy DB with Helm
+        displayName: Deploy Application with Helm
         steps:
           - checkout: self
 
@@ -293,8 +365,9 @@ stages:
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 ENVIRONMENT="${{ parameters.DEPLOY_ENV }}"
                 REGISTRY="$(ECR_REGISTRY)"
-                REPOSITORY="$(ECR_REPOSITORY)"
                 IMAGE_TAG="$(IMAGE_TAG_TO_DEPLOY)"
+                CHART_PATH="$(HELM_CHART_PATH)"
+                RELEASE="$(HELM_RELEASE)"
 
                 case "${ENVIRONMENT}" in
                   dev) CLUSTER_NAME="employee-mgm-dev-cluster" ;;
@@ -305,9 +378,20 @@ stages:
                 esac
 
                 if [ -z "${IMAGE_TAG}" ]; then
-                  echo "ERROR: Image tag was not produced. Check the earlier stages."
+                  echo "ERROR: Image tag is empty. Check the build/promotion output variables."
                   exit 1
                 fi
+
+                BACKEND_IMAGE="${REGISTRY}/employee-mgm-${ENVIRONMENT}-backend"
+                FRONTEND_IMAGE="${REGISTRY}/employee-mgm-${ENVIRONMENT}-frontend"
+                DB_IMAGE="${REGISTRY}/employee-mgm-${ENVIRONMENT}-db"
+
+                echo "Environment: ${ENVIRONMENT}"
+                echo "Cluster: ${CLUSTER_NAME}"
+                echo "Image tag: ${IMAGE_TAG}"
+                echo "Backend image: ${BACKEND_IMAGE}:${IMAGE_TAG}"
+                echo "Frontend image: ${FRONTEND_IMAGE}:${IMAGE_TAG}"
+                echo "Database image: ${DB_IMAGE}:${IMAGE_TAG}"
 
                 aws sts get-caller-identity
 
@@ -324,15 +408,34 @@ stages:
                 kubectl create namespace "${ENVIRONMENT}" \
                   --dry-run=client -o yaml | kubectl apply -f -
 
-                helm lint "$(HELM_CHART_PATH)"
+                helm lint "${CHART_PATH}"
 
-                helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
+                helm template "${RELEASE}" "${CHART_PATH}" \
+                  --namespace "${ENVIRONMENT}" \
+                  --set-string backend.image="${BACKEND_IMAGE}" \
+                  --set-string backend.tag="${IMAGE_TAG}" \
+                  --set-string frontend.image="${FRONTEND_IMAGE}" \
+                  --set-string frontend.tag="${IMAGE_TAG}" \
+                  --set-string mysql.image="${DB_IMAGE}" \
+                  --set-string mysql.tag="${IMAGE_TAG}" \
+                  > rendered-manifests.yaml
+
+                if grep -E 'image: ":?"$|image: ":"' rendered-manifests.yaml; then
+                  echo "ERROR: Helm rendered an empty or invalid image name."
+                  exit 1
+                fi
+
+                helm upgrade --install "${RELEASE}" "${CHART_PATH}" \
                   --namespace "${ENVIRONMENT}" \
                   --create-namespace \
-                  --set database.image.repository="${REGISTRY}/${REPOSITORY}" \
-                  --set database.image.tag="${IMAGE_TAG}" \
+                  --set-string backend.image="${BACKEND_IMAGE}" \
+                  --set-string backend.tag="${IMAGE_TAG}" \
+                  --set-string frontend.image="${FRONTEND_IMAGE}" \
+                  --set-string frontend.tag="${IMAGE_TAG}" \
+                  --set-string mysql.image="${DB_IMAGE}" \
+                  --set-string mysql.tag="${IMAGE_TAG}" \
                   --wait \
                   --timeout 10m
 
-                helm status "$(HELM_RELEASE)" --namespace "${ENVIRONMENT}"
+                helm status "${RELEASE}" --namespace "${ENVIRONMENT}"
                 kubectl get pods,svc -n "${ENVIRONMENT}"
