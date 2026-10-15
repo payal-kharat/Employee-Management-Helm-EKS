@@ -31,17 +31,18 @@ pool:
   name: AWS-EKS-Agents
 
 stages:
+
   - stage: BuildDev
-    displayName: 'Dev - Build and Push DB Image'
+    displayName: 'Dev - Build and Push All Images'
     condition: eq('${{ parameters.DEPLOY_ENV }}', 'dev')
     jobs:
       - job: BuildAndPush
-        displayName: Build DB Image
+        displayName: Build and Push Backend, Frontend and DB
         steps:
           - checkout: self
 
           - task: Bash@3
-            displayName: Build and Push DB Image to Dev ECR
+            displayName: Build and Push Images to ECR
             name: setTag
             inputs:
               targetType: inline
@@ -50,28 +51,54 @@ stages:
 
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
-                REPOSITORY="employee-mgm-dev-db"
                 COMMIT_ID="$(git rev-parse --short HEAD)"
                 IMAGE_TAG="DEV-${COMMIT_ID}-$(Build.BuildId)"
 
                 aws sts get-caller-identity
 
-                aws ecr describe-repositories \
-                  --repository-names "${REPOSITORY}" \
-                  --region "${AWS_DEFAULT_REGION}"
-
                 aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
                   docker login --username AWS --password-stdin "${REGISTRY}"
 
-                docker build \
-                  -f ./db/Dockerfile \
-                  -t "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}" \
-                  ./db
+                build_push() {
+                  REPOSITORY="$1"
+                  CONTEXT="$2"
 
-                docker push "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+                  if [ ! -f "${CONTEXT}/Dockerfile" ]; then
+                    echo "ERROR: Dockerfile not found at ${CONTEXT}/Dockerfile"
+                    exit 1
+                  fi
+
+                  echo "Building ${REPOSITORY}:${IMAGE_TAG}"
+
+                  aws ecr describe-repositories \
+                    --repository-names "${REPOSITORY}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  docker build \
+                    -f "${CONTEXT}/Dockerfile" \
+                    -t "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}" \
+                    "${CONTEXT}"
+
+                  docker push "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+
+                  aws ecr describe-images \
+                    --repository-name "${REPOSITORY}" \
+                    --image-ids imageTag="${IMAGE_TAG}" \
+                    --region "${AWS_DEFAULT_REGION}"
+
+                  echo "Verified image: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+                }
+
+                build_push "employee-mgm-dev-backend" "./backend"
+                build_push "employee-mgm-dev-frontend" "./frontend"
+                build_push "employee-mgm-dev-db" "./db"
 
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${IMAGE_TAG}"
-                echo "Dev image pushed: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+                echo "##vso[task.setvariable variable=BACKEND_IMAGE;isOutput=true]${REGISTRY}/employee-mgm-dev-backend"
+                echo "##vso[task.setvariable variable=FRONTEND_IMAGE;isOutput=true]${REGISTRY}/employee-mgm-dev-frontend"
+                echo "##vso[task.setvariable variable=DB_IMAGE;isOutput=true]${REGISTRY}/employee-mgm-dev-db"
+                echo "All three images pushed and verified successfully."
+
 
   - stage: PromoteQA
     displayName: 'Promote DB Image - Dev to QA'
