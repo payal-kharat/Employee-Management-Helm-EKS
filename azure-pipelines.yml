@@ -55,10 +55,7 @@ stages:
 
                 aws sts get-caller-identity
 
-                aws ecr get-login-password 
-                 --region "${AWS_DEFAULT_REGION}" | docker login 
-                 --username AWS 
-                 --password-stdin "${REGISTRY}"
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
 
                 build_push() {
                   REPOSITORY="$1"
@@ -70,17 +67,12 @@ stages:
 
                   echo "Building ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
 
-                  aws ecr describe-repositories 
-                   --repository-names "${REPOSITORY}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-repositories --repository-names "${REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
 
                   docker build -f "${CONTEXT}/Dockerfile" -t "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}" "${CONTEXT}"
                   docker push "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
 
-                  aws ecr describe-images 
-                   --repository-name "${REPOSITORY}" 
-                   --image-ids imageTag="${IMAGE_TAG}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${IMAGE_TAG}" --region "${AWS_DEFAULT_REGION}"
                   echo "Verified: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
                 }
                 build_push "employee-mgm-dev-backend" "./backend"
@@ -123,32 +115,22 @@ stages:
 
                 aws sts get-caller-identity
 
-                aws ecr get-login-password 
-                --region "${AWS_DEFAULT_REGION}" | docker login 
-                --username AWS --password-stdin "${REGISTRY}"
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
                 promote_image() {
                   SOURCE_REPOSITORY="$1"
                   TARGET_REPOSITORY="$2"
                   SOURCE_IMAGE="${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
                   TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
                   
-                  aws ecr describe-images 
-                   --repository-name "${SOURCE_REPOSITORY}" 
-                   --image-ids imageTag="${SOURCE_TAG}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG}" --region "${AWS_DEFAULT_REGION}"
 
-                  aws ecr describe-repositories 
-                   --repository-names "${TARGET_REPOSITORY}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
 
                   docker pull "${SOURCE_IMAGE}"
                   docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
                   docker push "${TARGET_IMAGE}"
 
-                  aws ecr describe-images 
-                   --repository-name "${TARGET_REPOSITORY}" 
-                   --image-ids imageTag="${TARGET_TAG}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
 
                   echo "Promoted: ${TARGET_IMAGE}"
                 }
@@ -189,10 +171,7 @@ stages:
 
                 aws sts get-caller-identity
 
-                aws ecr get-login-password 
-                 --region "${AWS_DEFAULT_REGION}" | docker login 
-                 --username AWS 
-                 --password-stdin "${REGISTRY}"
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
 
                 promote_image() {
                   SOURCE_REPOSITORY="$1"
@@ -200,23 +179,15 @@ stages:
                   SOURCE_IMAGE="${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_QA_TAG}"
                   TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
 
-                  aws ecr describe-images 
-                   --repository-name "${SOURCE_REPOSITORY}" 
-                   --image-ids imageTag="${SOURCE_QA_TAG}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_QA_TAG}" --region "${AWS_DEFAULT_REGION}"
 
-                  aws ecr describe-repositories 
-                   --repository-names "${TARGET_REPOSITORY}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
 
                   docker pull "${SOURCE_IMAGE}"
                   docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
                   docker push "${TARGET_IMAGE}"
 
-                  aws ecr describe-images 
-                   --repository-name "${TARGET_REPOSITORY}" 
-                   --image-ids imageTag="${TARGET_TAG}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
 
                   echo "Promoted: ${TARGET_IMAGE}"
                 }
@@ -279,10 +250,7 @@ stages:
 
                 aws sts get-caller-identity
 
-                aws ecr get-login-password 
-                 --region "${AWS_DEFAULT_REGION}" | docker login 
-                 --username AWS 
-                 --password-stdin "${REGISTRY}"
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
 
                 promote_image() {
                   SOURCE_REPOSITORY="$1"
@@ -290,23 +258,15 @@ stages:
                   SOURCE_IMAGE="${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_UAT_TAG}"
                   TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
 
-                  aws ecr describe-images 
-                   --repository-name "${SOURCE_REPOSITORY}" 
-                   --image-ids imageTag="${SOURCE_UAT_TAG}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_UAT_TAG}" --region "${AWS_DEFAULT_REGION}"
 
-                  aws ecr describe-repositories 
-                   --repository-names "${TARGET_REPOSITORY}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
 
                   docker pull "${SOURCE_IMAGE}"
                   docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
                   docker push "${TARGET_IMAGE}"
 
-                  aws ecr describe-images 
-                   --repository-name "${TARGET_REPOSITORY}" 
-                   --image-ids imageTag="${TARGET_TAG}" 
-                   --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
                    
                   echo "Promoted: ${TARGET_IMAGE}"
                 }
@@ -417,7 +377,7 @@ stages:
                   --set-string mysql.tag="${IMAGE_TAG}" \
                   > rendered-manifests.yaml
 
-                if grep -Eq 'image:[[:space:]]*(""|'\'''\''|:)' rendered-manifests.yaml; then
+                if grep -Eq 'image:[[:space:]]*(""|:)' rendered-manifests.yaml; then
                   echo "ERROR: Helm rendered an empty or invalid image name."
                   exit 1
                 fi
