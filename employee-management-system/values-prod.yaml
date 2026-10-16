@@ -1,0 +1,67 @@
+frontend:
+  name: frontend
+  replicas: 3
+  image: ""
+  tag: ""
+  containerPort: 80
+  service:
+    name: frontend-service
+    type: ClusterIP
+    port: 80
+
+backend:
+  name: backend
+  replicas: 3
+  image: ""
+  tag: ""
+  containerPort: 5000
+  configMapName: employee-cm
+  secretName: mysql-secret
+  service:
+    name: backend
+    type: ClusterIP
+    port: 5000
+
+mysql:
+  name: mysql
+  replicas: 1
+  image: ""
+  tag: ""
+  containerPort: 3306
+  secretName: mysql-secret
+  persistence:
+    existingClaim: mysql-pvc
+    size: 10Gi
+  service:
+    name: mysql
+    type: ClusterIP
+    port: 3306
+
+configMap:
+  name: employee-cm
+  data:
+    DB_HOST: mysql
+    DB_PORT: "3306"
+
+secret:
+  name: mysql-secret
+  stringData:
+    MYSQL_ROOT_PASSWORD: ""
+    MYSQL_DATABASE: ""
+    MYSQL_USER: ""
+    MYSQL_PASSWORD: ""
+
+storageClass:
+  name: ebs-gp3
+  volumeBindingMode: WaitForFirstConsumer
+  allowVolumeExpansion: true
+  parameters:
+    type: gp3
+    fsType: ext4
+
+ingress:
+  name: employee-management-ingress
+  className: alb
+  scheme: internet-facing
+  targetType: ip
+  host: employee-prod.com
