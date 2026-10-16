@@ -1,3 +1,4 @@
+
 trigger:
   - main
 
@@ -54,7 +55,6 @@ stages:
                 echo "Image tag: ${IMAGE_TAG}"
 
                 aws sts get-caller-identity
-
                 aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
 
                 build_push() {
@@ -66,25 +66,24 @@ stages:
                   fi
 
                   echo "Building ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
-
                   aws ecr describe-repositories --repository-names "${REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
-
                   docker build -f "${CONTEXT}/Dockerfile" -t "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}" "${CONTEXT}"
                   docker push "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
-
                   aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${IMAGE_TAG}" --region "${AWS_DEFAULT_REGION}"
                   echo "Verified: ${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
                 }
+
                 build_push "employee-mgm-dev-backend" "./backend"
                 build_push "employee-mgm-dev-frontend" "./frontend"
                 build_push "employee-mgm-dev-db" "./db"
+
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${IMAGE_TAG}"
                 echo "All three images pushed and verified successfully."
 
   - stage: PromoteQA
     displayName: 'Promote All Images - Dev to QA'
     dependsOn: BuildDev
-    condition: and(not(failed()), not(canceled()), in('${{ parameters.DEPLOY_ENV }}', 'qa', 'uat', 'prod'))
+    condition: and(not(canceled()), in('${{ parameters.DEPLOY_ENV }}', 'qa', 'uat', 'prod'), in(dependencies.BuildDev.result, 'Succeeded', 'Skipped'))
     jobs:
       - job: Promote
         displayName: Promote Backend, Frontend and DB to QA
@@ -100,6 +99,7 @@ stages:
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+
                 if [ -z "${SOURCE_TAG}" ]; then
                   echo "ERROR: Supply the existing DEV image tag, for example DEV-3c25b00."
                   exit 1
@@ -114,16 +114,15 @@ stages:
                 TARGET_TAG="QA-${COMMIT_ID}"
 
                 aws sts get-caller-identity
-
                 aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+
                 promote_image() {
                   SOURCE_REPOSITORY="$1"
                   TARGET_REPOSITORY="$2"
                   SOURCE_IMAGE="${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
                   TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                  
-                  aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG}" --region "${AWS_DEFAULT_REGION}"
 
+                  aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG}" --region "${AWS_DEFAULT_REGION}"
                   aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
 
                   docker pull "${SOURCE_IMAGE}"
@@ -131,19 +130,20 @@ stages:
                   docker push "${TARGET_IMAGE}"
 
                   aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
-
                   echo "Promoted: ${TARGET_IMAGE}"
                 }
+
                 promote_image "employee-mgm-dev-backend" "employee-mgm-qa-backend"
                 promote_image "employee-mgm-dev-frontend" "employee-mgm-qa-frontend"
                 promote_image "employee-mgm-dev-db" "employee-mgm-qa-db"
+
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
                 echo "All three QA images promoted successfully."
 
   - stage: PromoteUAT
     displayName: 'Promote All Images - QA to UAT'
     dependsOn: PromoteQA
-    condition: and(not(failed()), not(canceled()), in('${{ parameters.DEPLOY_ENV }}', 'uat', 'prod'))
+    condition: and(succeeded(), in('${{ parameters.DEPLOY_ENV }}', 'uat', 'prod'))
     jobs:
       - job: Promote
         displayName: Promote Backend, Frontend and DB to UAT
@@ -158,8 +158,8 @@ stages:
                 set -euo pipefail
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
-
                 SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+
                 if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
                   echo "ERROR: Supply the original DEV tag, for example DEV-3c25b00."
                   exit 1
@@ -170,7 +170,6 @@ stages:
                 TARGET_TAG="UAT-${COMMIT_ID}"
 
                 aws sts get-caller-identity
-
                 aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
 
                 promote_image() {
@@ -180,7 +179,6 @@ stages:
                   TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
 
                   aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_QA_TAG}" --region "${AWS_DEFAULT_REGION}"
-
                   aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
 
                   docker pull "${SOURCE_IMAGE}"
@@ -188,19 +186,20 @@ stages:
                   docker push "${TARGET_IMAGE}"
 
                   aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
-
                   echo "Promoted: ${TARGET_IMAGE}"
                 }
+
                 promote_image "employee-mgm-qa-backend" "employee-mgm-uat-backend"
                 promote_image "employee-mgm-qa-frontend" "employee-mgm-uat-frontend"
                 promote_image "employee-mgm-qa-db" "employee-mgm-uat-db"
+
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
                 echo "All three UAT images promoted successfully."
 
   - stage: ProductionApproval
     displayName: 'Production - Manual Approval'
     dependsOn: PromoteUAT
-    condition: and(not(failed()), not(canceled()), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
+    condition: and(succeeded(), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
     jobs:
       - job: ManualApproval
         displayName: Approve Production Deployment
@@ -222,7 +221,7 @@ stages:
   - stage: PromotePROD
     displayName: 'Promote All Images - UAT to PROD'
     dependsOn: ProductionApproval
-    condition: and(not(failed()), not(canceled()), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
+    condition: and(succeeded(), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
     jobs:
       - job: Promote
         displayName: Promote Backend, Frontend and DB to Production
@@ -249,7 +248,6 @@ stages:
                 TARGET_TAG="PROD-${COMMIT_ID}"
 
                 aws sts get-caller-identity
-
                 aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
 
                 promote_image() {
@@ -259,7 +257,6 @@ stages:
                   TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
 
                   aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_UAT_TAG}" --region "${AWS_DEFAULT_REGION}"
-
                   aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
 
                   docker pull "${SOURCE_IMAGE}"
@@ -267,12 +264,13 @@ stages:
                   docker push "${TARGET_IMAGE}"
 
                   aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
-                   
                   echo "Promoted: ${TARGET_IMAGE}"
                 }
+
                 promote_image "employee-mgm-uat-backend" "employee-mgm-prod-backend"
                 promote_image "employee-mgm-uat-frontend" "employee-mgm-prod-frontend"
                 promote_image "employee-mgm-uat-db" "employee-mgm-prod-db"
+
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TARGET_TAG}"
                 echo "All three production images promoted successfully."
 
