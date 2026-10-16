@@ -32,7 +32,7 @@ pool:
 stages:
   - stage: BuildDev
     displayName: 'Dev - Build and Push All Images'
-    condition: eq('${{ parameters.DEPLOY_ENV }}', 'dev')
+    condition: and(succeeded(), eq('${{ parameters.DEPLOY_ENV }}', 'dev'))
     jobs:
       - job: BuildAndPush
         displayName: Build and Push Backend, Frontend and DB
@@ -279,12 +279,15 @@ stages:
   - stage: DeployDB
     displayName: 'Deploy Application using Helm on EKS'
     dependsOn:
-      - BuildDev
-      - PromoteQA
-      - PromoteUAT
-      - ProductionApproval
-      - PromotePROD
-    condition: and(not(failed()), not(canceled()))
+      - ${{ if eq(parameters.DEPLOY_ENV, 'dev') }}:
+          - BuildDev
+      - ${{ if eq(parameters.DEPLOY_ENV, 'qa') }}:
+          - PromoteQA
+      - ${{ if eq(parameters.DEPLOY_ENV, 'uat') }}:
+          - PromoteUAT
+      - ${{ if eq(parameters.DEPLOY_ENV, 'prod') }}:
+          - PromotePROD
+    condition: succeeded()
     variables:
       ${{ if eq(parameters.DEPLOY_ENV, 'dev') }}:
         IMAGE_TAG_TO_DEPLOY: $[ stageDependencies.BuildDev.BuildAndPush.outputs['setTag.IMAGE_TAG'] ]
