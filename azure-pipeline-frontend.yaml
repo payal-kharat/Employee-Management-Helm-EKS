@@ -8,6 +8,8 @@
 #       - azure-pipelines-db.yml
 # trigger: none
 
+
+trigger: none
 pr: none
 
 parameters:
@@ -26,11 +28,7 @@ parameters:
     default: ''
 
 variables:
-  AWS_REGION: 'us-east-1'
-  AWS_ACCOUNT_ID: '552940445807'
-  ECR_REGISTRY: '552940445807.dkr.ecr.us-east-1.amazonaws.com'
-  HELM_RELEASE: 'employee-management-frontend'
-  HELM_CHART_PATH: 'employee-management-system'
+  - group: employee-mgm-frontend-cicd
 
 pool:
   name: AWS-EKS-Agents
@@ -51,7 +49,7 @@ stages:
                 set -euo pipefail
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
-                REPOSITORY="employee-mgm-dev-frontend"
+                REPOSITORY="$(ECR_REPOSITORY_PREFIX)-dev-frontend"
                 COMMIT_ID="$(git rev-parse --short HEAD)"
                 TAG="DEV-${COMMIT_ID}"
                 IMAGE="${REGISTRY}/${REPOSITORY}:${TAG}"
@@ -84,12 +82,14 @@ stages:
                 set -euo pipefail
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
+                PREFIX="$(ECR_REPOSITORY_PREFIX)"
                 SOURCE_TAG="${SOURCE_TAG_INPUT}"
+
                 [[ "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]] || { echo "ERROR: Enter a valid DEV tag, e.g. DEV-b625074"; exit 1; }
 
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
-                SOURCE_REPOSITORY="employee-mgm-dev-frontend"
-                TARGET_REPOSITORY="employee-mgm-qa-frontend"
+                SOURCE_REPOSITORY="${PREFIX}-dev-frontend"
+                TARGET_REPOSITORY="${PREFIX}-qa-frontend"
                 TARGET_TAG="QA-${COMMIT_ID}"
 
                 aws sts get-caller-identity
@@ -120,12 +120,14 @@ stages:
                 set -euo pipefail
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
+                PREFIX="$(ECR_REPOSITORY_PREFIX)"
                 SOURCE_TAG="${SOURCE_TAG_INPUT}"
+
                 [[ "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]] || { echo "ERROR: Enter a valid DEV tag, e.g. DEV-b625074"; exit 1; }
 
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
-                SOURCE_REPOSITORY="employee-mgm-qa-frontend"
-                TARGET_REPOSITORY="employee-mgm-uat-frontend"
+                SOURCE_REPOSITORY="${PREFIX}-qa-frontend"
+                TARGET_REPOSITORY="${PREFIX}-uat-frontend"
                 SOURCE_TAG_QA="QA-${COMMIT_ID}"
                 TARGET_TAG="UAT-${COMMIT_ID}"
 
@@ -178,12 +180,14 @@ stages:
                 set -euo pipefail
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
+                PREFIX="$(ECR_REPOSITORY_PREFIX)"
                 SOURCE_TAG="${SOURCE_TAG_INPUT}"
+
                 [[ "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]] || { echo "ERROR: Enter a valid DEV tag, e.g. DEV-b625074"; exit 1; }
 
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
-                SOURCE_REPOSITORY="employee-mgm-uat-frontend"
-                TARGET_REPOSITORY="employee-mgm-prod-frontend"
+                SOURCE_REPOSITORY="${PREFIX}-uat-frontend"
+                TARGET_REPOSITORY="${PREFIX}-prod-frontend"
                 SOURCE_TAG_UAT="UAT-${COMMIT_ID}"
                 TARGET_TAG="PROD-${COMMIT_ID}"
 
@@ -230,6 +234,8 @@ stages:
                 set -euo pipefail
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
+                PREFIX="$(ECR_REPOSITORY_PREFIX)"
+                CLUSTER_PREFIX="$(EKS_CLUSTER_PREFIX)"
                 CHART="$(HELM_CHART_PATH)"
                 RELEASE="$(HELM_RELEASE)"
                 ENVIRONMENT="${SELECTED_ENV}"
@@ -237,9 +243,7 @@ stages:
                 case "${ENVIRONMENT}" in
                   dev)
                     NAMESPACE="dev"
-                    CLUSTER_NAME="employee-mgm-dev-cluster"
-                    REPOSITORY="employee-mgm-dev-frontend"
-                    VALUES_FILE="${CHART}/values-dev.yaml"
+                    REPOSITORY="${PREFIX}-dev-frontend"
                     TAG="DEV-$(git rev-parse --short HEAD)"
                     ;;
                   qa|uat|prod)
@@ -247,25 +251,32 @@ stages:
                     [[ "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]] || { echo "ERROR: Enter the original DEV tag, e.g. DEV-b625074"; exit 1; }
                     COMMIT_ID="${SOURCE_TAG#DEV-}"
                     NAMESPACE="${ENVIRONMENT}"
-                    CLUSTER_NAME="employee-mgm-${ENVIRONMENT}-cluster"
-                    REPOSITORY="employee-mgm-${ENVIRONMENT}-frontend"
-                    VALUES_FILE="${CHART}/values-${ENVIRONMENT}.yaml"
+                    REPOSITORY="${PREFIX}-${ENVIRONMENT}-frontend"
                     TAG="$(echo "${ENVIRONMENT}" | tr '[:lower:]' '[:upper:]')-${COMMIT_ID}"
                     ;;
-                  *) echo "ERROR: Unsupported environment: ${ENVIRONMENT}"; exit 1 ;;
+                  *)
+                    echo "ERROR: Unsupported environment: ${ENVIRONMENT}"
+                    exit 1
+                    ;;
                 esac
 
+                CLUSTER_NAME="${CLUSTER_PREFIX}-${ENVIRONMENT}-cluster"
+                VALUES_FILE="${CHART}/values-${ENVIRONMENT}.yaml"
                 IMAGE="${REGISTRY}/${REPOSITORY}"
+
                 test -f "${VALUES_FILE}" || { echo "ERROR: Values file not found: ${VALUES_FILE}"; exit 1; }
+
                 aws sts get-caller-identity
                 aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${TAG}" --region "${AWS_DEFAULT_REGION}"
                 aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
                 kubectl get nodes
                 kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
                 helm lint "${CHART}" -f "${VALUES_FILE}"
 
                 helm upgrade --install "${RELEASE}" "${CHART}" \
-                  --namespace "${NAMESPACE}" --create-namespace \
+                  --namespace "${NAMESPACE}" \
+                  --create-namespace \
                   -f "${VALUES_FILE}" \
                   --set frontend.enabled=true \
                   --set-string frontend.image="${IMAGE}" \

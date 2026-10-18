@@ -52,10 +52,10 @@ secret:
   enabled: true
   name: mysql-secret
   stringData:
-    MYSQL_ROOT_PASSWORD: "rootpassword"
-    MYSQL_DATABASE: "employee_db"
-    MYSQL_USER: "employee_user"
-    MYSQL_PASSWORD: "employee123"
+    MYSQL_ROOT_PASSWORD: ""
+    MYSQL_DATABASE: ""
+    MYSQL_USER: ""
+    MYSQL_PASSWORD: ""
 
 storageClass:
   enabled: true
