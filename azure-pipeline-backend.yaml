@@ -1,0 +1,257 @@
+trigger:
+  - main
+
+pr: none
+
+parameters:
+  - name: DEPLOY_ENV
+    displayName: Deployment Environment
+    type: string
+    default: dev
+    values:
+      - dev
+      - qa
+      - uat
+      - prod
+  - name: IMAGE_TAG
+    displayName: Existing DEV Image Tag (Required for QA, UAT and PROD)
+    type: string
+    default: ''
+
+variables:
+  AWS_REGION: 'us-east-1'
+  AWS_ACCOUNT_ID: '552940445807'
+  ECR_REGISTRY: '552940445807.dkr.ecr.us-east-1.amazonaws.com'
+  HELM_RELEASE: 'employee-management-system'
+  HELM_CHART_PATH: 'employee-management-system'
+
+pool:
+  name: AWS-EKS-Agents
+
+stages:
+  - stage: BuildDev
+    displayName: 'DEV - Build, Push and Deploy Backend'
+    condition: eq('${{ parameters.DEPLOY_ENV }}', 'dev')
+    jobs:
+      - job: BuildDeployDev
+        steps:
+          - checkout: self
+          - task: Bash@3
+            displayName: Build, Push and Deploy Backend in DEV
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
+                REGISTRY="$(ECR_REGISTRY)"
+                REPOSITORY="employee-mgm-dev-backend"
+                COMMIT_ID="$(git rev-parse --short HEAD)"
+                TAG="DEV-${COMMIT_ID}"
+                IMAGE="${REGISTRY}/${REPOSITORY}:${TAG}"
+                CONTEXT="./backend"
+
+                test -f "${CONTEXT}/Dockerfile" || { echo "ERROR: ${CONTEXT}/Dockerfile not found"; exit 1; }
+                aws sts get-caller-identity
+                aws ecr describe-repositories --repository-names "${REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+                docker build -f "${CONTEXT}/Dockerfile" -t "${IMAGE}" "${CONTEXT}"
+                docker push "${IMAGE}"
+                aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${TAG}" --region "${AWS_DEFAULT_REGION}"
+                echo "Built and verified: ${IMAGE}"
+
+                ENVIRONMENT="dev"
+                CLUSTER_NAME="employee-mgm-dev-cluster"
+                VALUES_FILE="$(HELM_CHART_PATH)/values-dev.yaml"
+                helm lint "$(HELM_CHART_PATH)" -f "${VALUES_FILE}"
+                aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
+                kubectl get nodes
+                kubectl create namespace dev --dry-run=client -o yaml | kubectl apply -f -
+                helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
+                  --namespace dev --create-namespace -f "${VALUES_FILE}" \
+                  --set-string backend.image="${IMAGE}" \
+                  --set-string backend.tag="${TAG}" \
+                  --wait --timeout 10m
+                helm status "$(HELM_RELEASE)" --namespace dev
+                kubectl get pods,svc -n dev
+
+  - stage: PromoteQA
+    displayName: 'Promote DEV Image to QA'
+    condition: in('${{ parameters.DEPLOY_ENV }}', 'qa', 'uat', 'prod')
+    jobs:
+      - job: PromoteToQA
+        steps:
+          - checkout: self
+          - task: Bash@3
+            displayName: Promote Backend DEV to QA and deploy when QA selected
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
+                REGISTRY="$(ECR_REGISTRY)"
+                SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+                if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
+                  echo "ERROR: Enter the original DEV tag, for example DEV-3c25b00."
+                  exit 1
+                fi
+                COMMIT_ID="${SOURCE_TAG#DEV-}"
+                TARGET_TAG="QA-${COMMIT_ID}"
+                SOURCE_REPOSITORY="employee-mgm-dev-backend"
+                TARGET_REPOSITORY="employee-mgm-qa-backend"
+                aws sts get-caller-identity
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG}" --region "${AWS_DEFAULT_REGION}"
+                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
+                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
+                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+                echo "Promoted: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                if [ "${{ parameters.DEPLOY_ENV }}" = "qa" ]; then
+                  ENVIRONMENT="qa"
+                  CLUSTER_NAME="employee-mgm-qa-cluster"
+                  VALUES_FILE="$(HELM_CHART_PATH)/values-qa.yaml"
+                  IMAGE="${REGISTRY}/employee-mgm-qa-backend"
+                  TAG="${TARGET_TAG}"
+                  helm lint "$(HELM_CHART_PATH)" -f "${VALUES_FILE}"
+                  aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
+                  kubectl get nodes
+                  kubectl create namespace qa --dry-run=client -o yaml | kubectl apply -f -
+                  helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
+                    --namespace qa --create-namespace -f "${VALUES_FILE}" \
+                  --set-string backend.image="${IMAGE}" \
+                  --set-string backend.tag="${TAG}" \
+                    --wait --timeout 10m
+                  helm status "$(HELM_RELEASE)" --namespace qa
+                  kubectl get pods,svc -n qa
+                fi
+
+  - stage: PromoteUAT
+    displayName: 'Promote QA Image to UAT'
+    dependsOn: PromoteQA
+    condition: and(succeeded(), in('${{ parameters.DEPLOY_ENV }}', 'uat', 'prod'))
+    jobs:
+      - job: PromoteToUAT
+        steps:
+          - checkout: self
+          - task: Bash@3
+            displayName: Promote Backend QA to UAT and deploy when UAT selected
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
+                REGISTRY="$(ECR_REGISTRY)"
+                SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+                if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
+                  echo "ERROR: Enter the original DEV tag, for example DEV-3c25b00."
+                  exit 1
+                fi
+                COMMIT_ID="${SOURCE_TAG#DEV-}"
+                SOURCE_TAG_QA="QA-${COMMIT_ID}"
+                TARGET_TAG="UAT-${COMMIT_ID}"
+                SOURCE_REPOSITORY="employee-mgm-qa-backend"
+                TARGET_REPOSITORY="employee-mgm-uat-backend"
+                aws sts get-caller-identity
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG_QA}" --region "${AWS_DEFAULT_REGION}"
+                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
+                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}"
+                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+                echo "Promoted: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                if [ "${{ parameters.DEPLOY_ENV }}" = "uat" ]; then
+                  ENVIRONMENT="uat"
+                  CLUSTER_NAME="employee-mgm-uat-cluster"
+                  VALUES_FILE="$(HELM_CHART_PATH)/values-uat.yaml"
+                  IMAGE="${REGISTRY}/employee-mgm-uat-backend"
+                  TAG="${TARGET_TAG}"
+                  helm lint "$(HELM_CHART_PATH)" -f "${VALUES_FILE}"
+                  aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
+                  kubectl get nodes
+                  kubectl create namespace uat --dry-run=client -o yaml | kubectl apply -f -
+                  helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
+                    --namespace uat --create-namespace -f "${VALUES_FILE}" \
+                  --set-string backend.image="${IMAGE}" \
+                  --set-string backend.tag="${TAG}" \
+                    --wait --timeout 10m
+                  helm status "$(HELM_RELEASE)" --namespace uat
+                  kubectl get pods,svc -n uat
+                fi
+
+  - stage: ProductionApproval
+    displayName: 'PROD - Manual Approval'
+    dependsOn: PromoteUAT
+    condition: and(succeeded(), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
+    jobs:
+      - job: ManualApproval
+        pool: server
+        timeoutInMinutes: 1440
+        steps:
+          - task: ManualValidation@1
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: ''
+              approvers: ''
+              allowApproversToApproveTheirOwnRuns: true
+              instructions: |
+                Review the Backend image before production deployment.
+                Original DEV image tag: ${{ parameters.IMAGE_TAG }}
+                Approve to promote the same image to PROD and deploy.
+              onTimeout: reject
+
+  - stage: PromotePROD
+    displayName: 'Promote UAT Image to PROD and Deploy'
+    dependsOn: ProductionApproval
+    condition: and(succeeded(), eq('${{ parameters.DEPLOY_ENV }}', 'prod'))
+    jobs:
+      - job: PromoteDeployPROD
+        steps:
+          - checkout: self
+          - task: Bash@3
+            displayName: Promote Backend UAT to PROD and deploy
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                export AWS_DEFAULT_REGION="$(AWS_REGION)"
+                REGISTRY="$(ECR_REGISTRY)"
+                SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+                if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
+                  echo "ERROR: Enter the original DEV tag, for example DEV-3c25b00."
+                  exit 1
+                fi
+                COMMIT_ID="${SOURCE_TAG#DEV-}"
+                SOURCE_TAG_UAT="UAT-${COMMIT_ID}"
+                TARGET_TAG="PROD-${COMMIT_ID}"
+                SOURCE_REPOSITORY="employee-mgm-uat-backend"
+                TARGET_REPOSITORY="employee-mgm-prod-backend"
+                aws sts get-caller-identity
+                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG_UAT}" --region "${AWS_DEFAULT_REGION}"
+                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
+                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}"
+                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+                echo "Promoted: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                ENVIRONMENT="prod"
+                CLUSTER_NAME="employee-mgm-prod-cluster"
+                VALUES_FILE="$(HELM_CHART_PATH)/values-prod.yaml"
+                IMAGE="${REGISTRY}/employee-mgm-prod-backend"
+                TAG="${TARGET_TAG}"
+                helm lint "$(HELM_CHART_PATH)" -f "${VALUES_FILE}"
+                aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
+                kubectl get nodes
+                kubectl create namespace prod --dry-run=client -o yaml | kubectl apply -f -
+                helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
+                  --namespace prod --create-namespace -f "${VALUES_FILE}" \
+                  --set-string backend.image="${IMAGE}" \
+                  --set-string backend.tag="${TAG}" \
+                  --wait --timeout 10m
+                helm status "$(HELM_RELEASE)" --namespace prod
+                kubectl get pods,svc -n prod
