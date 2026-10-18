@@ -42,12 +42,14 @@ mysql:
     port: 3306
 
 configMap:
+  enabled: true
   name: employee-cm
   data:
     DB_HOST: mysql
     DB_PORT: "3306"
 
 secret:
+  enabled: true
   name: mysql-secret
   stringData:
     MYSQL_ROOT_PASSWORD: "rootpassword"
