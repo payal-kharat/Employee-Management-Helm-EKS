@@ -1,4 +1,4 @@
-
+{{- if .Values.mysql.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -10,3 +10,4 @@ spec:
   ports:
     - port: {{ .Values.mysql.service.port }}
       targetPort: {{ .Values.mysql.containerPort }}
+{{- end }}        

@@ -1,5 +1,6 @@
 
 frontend:
+  enabled: true
   name: frontend
   replicas: 1
   image: ""
@@ -11,6 +12,7 @@ frontend:
     port: 80
 
 backend:
+  enabled: true
   name: backend
   replicas: 1
   image: ""
@@ -24,6 +26,7 @@ backend:
     port: 5000
 
 mysql:
+  enabled: true
   name: mysql
   replicas: 1
   image: ""
@@ -53,6 +56,7 @@ secret:
     MYSQL_PASSWORD: "employee123"
 
 storageClass:
+  enabled: true
   name: ebs-gp3
   volumeBindingMode: WaitForFirstConsumer
   allowVolumeExpansion: true
@@ -61,6 +65,7 @@ storageClass:
     fsType: ext4
 
 ingress:
+  enabled: true
   name: employee-management-ingress
   className: alb
   scheme: internet-facing
