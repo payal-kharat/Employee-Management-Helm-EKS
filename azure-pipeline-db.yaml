@@ -1,3 +1,4 @@
+
 trigger:
   - main
 
@@ -30,10 +31,10 @@ pool:
 
 stages:
   - stage: BuildDev
-    displayName: 'DEV - Build, Push and Deploy Database'
+    displayName: 'DEV - Build and Push Database'
     condition: eq('${{ parameters.DEPLOY_ENV }}', 'dev')
     jobs:
-      - job: BuildDeployDev
+      - job: BuildPushDev
         steps:
           - checkout: self
           - task: Bash@3
@@ -47,32 +48,59 @@ stages:
                 REPOSITORY="employee-mgm-dev-db"
                 COMMIT_ID="$(git rev-parse --short HEAD)"
                 TAG="DEV-${COMMIT_ID}"
-                IMAGE="${REGISTRY}/${REPOSITORY}:${TAG}"
-                CONTEXT="./db"
+                IMAGE="${REGISTRY}/${REPOSITORY}"
+                IMAGE_REF="${IMAGE}:${TAG}"
+                CHART="$(HELM_CHART_PATH)"
+                VALUES_FILE="${CHART}/values-dev.yaml"
+                CLUSTER_NAME="employee-mgm-dev-cluster"
 
-                test -f "${CONTEXT}/Dockerfile" || { echo "ERROR: ${CONTEXT}/Dockerfile not found"; exit 1; }
+                login_ecr() {
+                  aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+                }
+
+                deploy_database() {
+                  local namespace="$1"
+                  local cluster="$2"
+                  local values="$3"
+                  local repository_uri="$4"
+                  local tag="$5"
+
+                  test -f "${values}" || { echo "ERROR: Values file not found: ${values}"; return 1; }
+                  helm lint "${CHART}" -f "${values}"
+                  aws eks update-kubeconfig --name "${cluster}" --region "${AWS_DEFAULT_REGION}"
+                  kubectl get nodes
+                  kubectl create namespace "${namespace}" --dry-run=client -o yaml | kubectl apply -f -
+
+                  if ! helm upgrade --install "$(HELM_RELEASE)" "${CHART}" \
+                    --namespace "${namespace}" \
+                    --create-namespace \
+                    -f "${values}" \
+                    --set-string mysql.image="${repository_uri}" \
+                    --set-string mysql.tag="${tag}" \
+                    --wait --timeout 10m; then
+                    echo "ERROR: Helm deployment failed. Collecting diagnostics..."
+                    helm status "$(HELM_RELEASE)" -n "${namespace}" || true
+                    kubectl get pods,pvc,svc -n "${namespace}" -o wide || true
+                    kubectl get events -n "${namespace}" --sort-by=.lastTimestamp | tail -40 || true
+                    return 1
+                  fi
+
+                  helm status "$(HELM_RELEASE)" -n "${namespace}"
+                  kubectl get pods,svc,pvc -n "${namespace}" -o wide
+                }
+
+                test -f "./db/Dockerfile" || { echo "ERROR: ./db/Dockerfile not found"; exit 1; }
+                test -f "${VALUES_FILE}" || { echo "ERROR: ${VALUES_FILE} not found"; exit 1; }
+
                 aws sts get-caller-identity
                 aws ecr describe-repositories --repository-names "${REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
-                docker build -f "${CONTEXT}/Dockerfile" -t "${IMAGE}" "${CONTEXT}"
-                docker push "${IMAGE}"
+                login_ecr
+                docker build -f ./db/Dockerfile -t "${IMAGE_REF}" ./db
+                docker push "${IMAGE_REF}"
                 aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${TAG}" --region "${AWS_DEFAULT_REGION}"
-                echo "Built and verified: ${IMAGE}"
+                echo "Built and verified: ${IMAGE_REF}"
 
-                ENVIRONMENT="dev"
-                CLUSTER_NAME="employee-mgm-dev-cluster"
-                VALUES_FILE="$(HELM_CHART_PATH)/values-dev.yaml"
-                helm lint "$(HELM_CHART_PATH)" -f "${VALUES_FILE}"
-                aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
-                kubectl get nodes
-                kubectl create namespace dev --dry-run=client -o yaml | kubectl apply -f -
-                helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
-                  --namespace dev --create-namespace -f "${VALUES_FILE}" \
-                  --set-string mysql.image="${IMAGE}" \
-                  --set-string mysql.tag="${TAG}" \
-                  --wait --timeout 10m
-                helm status "$(HELM_RELEASE)" --namespace dev
-                kubectl get pods,svc -n dev
+                deploy_database dev "${CLUSTER_NAME}" "${VALUES_FILE}" "${IMAGE}" "${TAG}"
 
   - stage: PromoteQA
     displayName: 'Promote DEV Image to QA'
@@ -82,7 +110,7 @@ stages:
         steps:
           - checkout: self
           - task: Bash@3
-            displayName: Promote Database DEV to QA and deploy when QA selected
+            displayName: Promote DEV Image to QA and Deploy when QA Selected
             inputs:
               targetType: inline
               script: |
@@ -90,41 +118,78 @@ stages:
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+
                 if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
-                  echo "ERROR: Enter the original DEV tag, for example DEV-3c25b00."
+                  echo "ERROR: Enter an existing DEV image tag, for example DEV-3c25b00."
                   exit 1
                 fi
+
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
                 TARGET_TAG="QA-${COMMIT_ID}"
                 SOURCE_REPOSITORY="employee-mgm-dev-db"
                 TARGET_REPOSITORY="employee-mgm-qa-db"
+                SOURCE_IMAGE="${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
+                TARGET_IMAGE="${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                CHART="$(HELM_CHART_PATH)"
+
+                login_ecr() {
+                  aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+                }
+
+                promote_image() {
+                  local source_repo="$1"
+                  local source_tag="$2"
+                  local target_repo="$3"
+                  local target_tag="$4"
+
+                  aws ecr describe-images --repository-name "${source_repo}" --image-ids "imageTag=${source_tag}" --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-repositories --repository-names "${target_repo}" --region "${AWS_DEFAULT_REGION}"
+                  docker pull "${REGISTRY}/${source_repo}:${source_tag}"
+                  docker tag "${REGISTRY}/${source_repo}:${source_tag}" "${REGISTRY}/${target_repo}:${target_tag}"
+                  docker push "${REGISTRY}/${target_repo}:${target_tag}"
+                  aws ecr describe-images --repository-name "${target_repo}" --image-ids "imageTag=${target_tag}" --region "${AWS_DEFAULT_REGION}"
+                  echo "Promoted: ${REGISTRY}/${target_repo}:${target_tag}"
+                }
+
+                deploy_database() {
+                  local namespace="$1"
+                  local cluster="$2"
+                  local values="$3"
+                  local repository_uri="$4"
+                  local tag="$5"
+
+                  test -f "${values}" || { echo "ERROR: Values file not found: ${values}"; return 1; }
+                  helm lint "${CHART}" -f "${values}"
+                  aws eks update-kubeconfig --name "${cluster}" --region "${AWS_DEFAULT_REGION}"
+                  kubectl get nodes
+                  kubectl create namespace "${namespace}" --dry-run=client -o yaml | kubectl apply -f -
+
+                  if ! helm upgrade --install "$(HELM_RELEASE)" "${CHART}" \
+                    --namespace "${namespace}" \
+                    --create-namespace \
+                    -f "${values}" \
+                    --set-string mysql.image="${repository_uri}" \
+                    --set-string mysql.tag="${tag}" \
+                    --wait --timeout 10m; then
+                    echo "ERROR: Helm deployment failed. Collecting diagnostics..."
+                    helm status "$(HELM_RELEASE)" -n "${namespace}" || true
+                    kubectl get pods,pvc,svc -n "${namespace}" -o wide || true
+                    kubectl get events -n "${namespace}" --sort-by=.lastTimestamp | tail -40 || true
+                    return 1
+                  fi
+
+                  helm status "$(HELM_RELEASE)" -n "${namespace}"
+                  kubectl get pods,svc,pvc -n "${namespace}" -o wide
+                }
+
                 aws sts get-caller-identity
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
-                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG}" --region "${AWS_DEFAULT_REGION}"
-                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
-                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
-                echo "Promoted: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                login_ecr
+                promote_image "${SOURCE_REPOSITORY}" "${SOURCE_TAG}" "${TARGET_REPOSITORY}" "${TARGET_TAG}"
 
                 if [ "${{ parameters.DEPLOY_ENV }}" = "qa" ]; then
-                  ENVIRONMENT="qa"
-                  CLUSTER_NAME="employee-mgm-qa-cluster"
-                  VALUES_FILE="$(HELM_CHART_PATH)/values-qa.yaml"
-                  IMAGE="${REGISTRY}/employee-mgm-qa-db"
-                  TAG="${TARGET_TAG}"
-                  helm lint "$(HELM_CHART_PATH)" -f "${VALUES_FILE}"
-                  aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
-                  kubectl get nodes
-                  kubectl create namespace qa --dry-run=client -o yaml | kubectl apply -f -
-                  helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
-                    --namespace qa --create-namespace -f "${VALUES_FILE}" \
-                  --set-string mysql.image="${IMAGE}" \
-                  --set-string mysql.tag="${TAG}" \
-                    --wait --timeout 10m
-                  helm status "$(HELM_RELEASE)" --namespace qa
-                  kubectl get pods,svc -n qa
+                  deploy_database qa "employee-mgm-qa-cluster" \
+                    "${CHART}/values-qa.yaml" \
+                    "${REGISTRY}/${TARGET_REPOSITORY}" "${TARGET_TAG}"
                 fi
 
   - stage: PromoteUAT
@@ -136,7 +201,7 @@ stages:
         steps:
           - checkout: self
           - task: Bash@3
-            displayName: Promote Database QA to UAT and deploy when UAT selected
+            displayName: Promote QA Image to UAT and Deploy when UAT Selected
             inputs:
               targetType: inline
               script: |
@@ -144,42 +209,77 @@ stages:
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+
                 if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
-                  echo "ERROR: Enter the original DEV tag, for example DEV-3c25b00."
+                  echo "ERROR: Enter an existing DEV image tag, for example DEV-3c25b00."
                   exit 1
                 fi
+
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
                 SOURCE_TAG_QA="QA-${COMMIT_ID}"
                 TARGET_TAG="UAT-${COMMIT_ID}"
                 SOURCE_REPOSITORY="employee-mgm-qa-db"
                 TARGET_REPOSITORY="employee-mgm-uat-db"
+                CHART="$(HELM_CHART_PATH)"
+
+                login_ecr() {
+                  aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+                }
+
+                promote_image() {
+                  local source_repo="$1"
+                  local source_tag="$2"
+                  local target_repo="$3"
+                  local target_tag="$4"
+
+                  aws ecr describe-images --repository-name "${source_repo}" --image-ids "imageTag=${source_tag}" --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-repositories --repository-names "${target_repo}" --region "${AWS_DEFAULT_REGION}"
+                  docker pull "${REGISTRY}/${source_repo}:${source_tag}"
+                  docker tag "${REGISTRY}/${source_repo}:${source_tag}" "${REGISTRY}/${target_repo}:${target_tag}"
+                  docker push "${REGISTRY}/${target_repo}:${target_tag}"
+                  aws ecr describe-images --repository-name "${target_repo}" --image-ids "imageTag=${target_tag}" --region "${AWS_DEFAULT_REGION}"
+                  echo "Promoted: ${REGISTRY}/${target_repo}:${target_tag}"
+                }
+
+                deploy_database() {
+                  local namespace="$1"
+                  local cluster="$2"
+                  local values="$3"
+                  local repository_uri="$4"
+                  local tag="$5"
+
+                  test -f "${values}" || { echo "ERROR: Values file not found: ${values}"; return 1; }
+                  helm lint "${CHART}" -f "${values}"
+                  aws eks update-kubeconfig --name "${cluster}" --region "${AWS_DEFAULT_REGION}"
+                  kubectl get nodes
+                  kubectl create namespace "${namespace}" --dry-run=client -o yaml | kubectl apply -f -
+
+                  if ! helm upgrade --install "$(HELM_RELEASE)" "${CHART}" \
+                    --namespace "${namespace}" \
+                    --create-namespace \
+                    -f "${values}" \
+                    --set-string mysql.image="${repository_uri}" \
+                    --set-string mysql.tag="${tag}" \
+                    --wait --timeout 10m; then
+                    echo "ERROR: Helm deployment failed. Collecting diagnostics..."
+                    helm status "$(HELM_RELEASE)" -n "${namespace}" || true
+                    kubectl get pods,pvc,svc -n "${namespace}" -o wide || true
+                    kubectl get events -n "${namespace}" --sort-by=.lastTimestamp | tail -40 || true
+                    return 1
+                  fi
+
+                  helm status "$(HELM_RELEASE)" -n "${namespace}"
+                  kubectl get pods,svc,pvc -n "${namespace}" -o wide
+                }
+
                 aws sts get-caller-identity
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
-                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG_QA}" --region "${AWS_DEFAULT_REGION}"
-                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
-                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
-                echo "Promoted: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                login_ecr
+                promote_image "${SOURCE_REPOSITORY}" "${SOURCE_TAG_QA}" "${TARGET_REPOSITORY}" "${TARGET_TAG}"
 
                 if [ "${{ parameters.DEPLOY_ENV }}" = "uat" ]; then
-                  ENVIRONMENT="uat"
-                  CLUSTER_NAME="employee-mgm-uat-cluster"
-                  VALUES_FILE="$(HELM_CHART_PATH)/values-uat.yaml"
-                  IMAGE="${REGISTRY}/employee-mgm-uat-db"
-                  TAG="${TARGET_TAG}"
-                  helm lint "$(HELM_CHART_PATH)" -f "${VALUES_FILE}"
-                  aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
-                  kubectl get nodes
-                  kubectl create namespace uat --dry-run=client -o yaml | kubectl apply -f -
-                  helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
-                    --namespace uat --create-namespace -f "${VALUES_FILE}" \
-                  --set-string mysql.image="${IMAGE}" \
-                  --set-string mysql.tag="${TAG}" \
-                    --wait --timeout 10m
-                  helm status "$(HELM_RELEASE)" --namespace uat
-                  kubectl get pods,svc -n uat
+                  deploy_database uat "employee-mgm-uat-cluster" \
+                    "${CHART}/values-uat.yaml" \
+                    "${REGISTRY}/${TARGET_REPOSITORY}" "${TARGET_TAG}"
                 fi
 
   - stage: ProductionApproval
@@ -198,7 +298,7 @@ stages:
               approvers: ''
               allowApproversToApproveTheirOwnRuns: true
               instructions: |
-                Review the Database image before production deployment.
+                Review the database image before production deployment.
                 Original DEV image tag: ${{ parameters.IMAGE_TAG }}
                 Approve to promote the same image to PROD and deploy.
               onTimeout: reject
@@ -212,7 +312,7 @@ stages:
         steps:
           - checkout: self
           - task: Bash@3
-            displayName: Promote Database UAT to PROD and deploy
+            displayName: Promote UAT Image to PROD and Deploy
             inputs:
               targetType: inline
               script: |
@@ -220,38 +320,73 @@ stages:
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 SOURCE_TAG="${{ parameters.IMAGE_TAG }}"
+
                 if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
-                  echo "ERROR: Enter the original DEV tag, for example DEV-3c25b00."
+                  echo "ERROR: Enter an existing DEV image tag, for example DEV-3c25b00."
                   exit 1
                 fi
+
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
                 SOURCE_TAG_UAT="UAT-${COMMIT_ID}"
                 TARGET_TAG="PROD-${COMMIT_ID}"
                 SOURCE_REPOSITORY="employee-mgm-uat-db"
                 TARGET_REPOSITORY="employee-mgm-prod-db"
-                aws sts get-caller-identity
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
-                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG_UAT}" --region "${AWS_DEFAULT_REGION}"
-                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
-                docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
-                echo "Promoted: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+                CHART="$(HELM_CHART_PATH)"
+                VALUES_FILE="${CHART}/values-prod.yaml"
 
-                ENVIRONMENT="prod"
-                CLUSTER_NAME="employee-mgm-prod-cluster"
-                VALUES_FILE="$(HELM_CHART_PATH)/values-prod.yaml"
-                IMAGE="${REGISTRY}/employee-mgm-prod-db"
-                TAG="${TARGET_TAG}"
-                helm lint "$(HELM_CHART_PATH)" -f "${VALUES_FILE}"
-                aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
-                kubectl get nodes
-                kubectl create namespace prod --dry-run=client -o yaml | kubectl apply -f -
-                helm upgrade --install "$(HELM_RELEASE)" "$(HELM_CHART_PATH)" \
-                  --namespace prod --create-namespace -f "${VALUES_FILE}" \
-                  --set-string mysql.image="${IMAGE}" \
-                  --set-string mysql.tag="${TAG}" \
-                  --wait --timeout 10m
-                helm status "$(HELM_RELEASE)" --namespace prod
-                kubectl get pods,svc -n prod
+                login_ecr() {
+                  aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+                }
+
+                promote_image() {
+                  local source_repo="$1"
+                  local source_tag="$2"
+                  local target_repo="$3"
+                  local target_tag="$4"
+
+                  aws ecr describe-images --repository-name "${source_repo}" --image-ids "imageTag=${source_tag}" --region "${AWS_DEFAULT_REGION}"
+                  aws ecr describe-repositories --repository-names "${target_repo}" --region "${AWS_DEFAULT_REGION}"
+                  docker pull "${REGISTRY}/${source_repo}:${source_tag}"
+                  docker tag "${REGISTRY}/${source_repo}:${source_tag}" "${REGISTRY}/${target_repo}:${target_tag}"
+                  docker push "${REGISTRY}/${target_repo}:${target_tag}"
+                  aws ecr describe-images --repository-name "${target_repo}" --image-ids "imageTag=${target_tag}" --region "${AWS_DEFAULT_REGION}"
+                  echo "Promoted: ${REGISTRY}/${target_repo}:${target_tag}"
+                }
+
+                deploy_database() {
+                  local namespace="$1"
+                  local cluster="$2"
+                  local values="$3"
+                  local repository_uri="$4"
+                  local tag="$5"
+
+                  test -f "${values}" || { echo "ERROR: Values file not found: ${values}"; return 1; }
+                  helm lint "${CHART}" -f "${values}"
+                  aws eks update-kubeconfig --name "${cluster}" --region "${AWS_DEFAULT_REGION}"
+                  kubectl get nodes
+                  kubectl create namespace "${namespace}" --dry-run=client -o yaml | kubectl apply -f -
+
+                  if ! helm upgrade --install "$(HELM_RELEASE)" "${CHART}" \
+                    --namespace "${namespace}" \
+                    --create-namespace \
+                    -f "${values}" \
+                    --set-string mysql.image="${repository_uri}" \
+                    --set-string mysql.tag="${tag}" \
+                    --wait --timeout 10m; then
+                    echo "ERROR: Helm deployment failed. Collecting diagnostics..."
+                    helm status "$(HELM_RELEASE)" -n "${namespace}" || true
+                    kubectl get pods,pvc,svc -n "${namespace}" -o wide || true
+                    kubectl get events -n "${namespace}" --sort-by=.lastTimestamp | tail -40 || true
+                    return 1
+                  fi
+
+                  helm status "$(HELM_RELEASE)" -n "${namespace}"
+                  kubectl get pods,svc,pvc -n "${namespace}" -o wide
+                }
+
+                aws sts get-caller-identity
+                login_ecr
+                promote_image "${SOURCE_REPOSITORY}" "${SOURCE_TAG_UAT}" "${TARGET_REPOSITORY}" "${TARGET_TAG}"
+                deploy_database prod "employee-mgm-prod-cluster" \
+                  "${VALUES_FILE}" \
+                  "${REGISTRY}/${TARGET_REPOSITORY}" "${TARGET_TAG}"
