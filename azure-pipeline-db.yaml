@@ -1,6 +1,7 @@
 
 trigger: none
 pr: none
+
 parameters:
   - name: DEPLOY_ENV
     displayName: Deployment Environment
@@ -11,14 +12,18 @@ parameters:
       - qa
       - uat
       - prod
+
   - name: IMAGE_TAG
     displayName: Existing DEV Image Tag (Required for QA, UAT and PROD)
     type: string
     default: ''
+
 variables:
   - group: employee-mgm-db-cicd
+
 pool:
   name: AWS-EKS-Agents
+
 stages:
   - stage: BuildDev
     displayName: 'DEV - Build and Push Database'
@@ -27,27 +32,47 @@ stages:
       - job: BuildPushDev
         steps:
           - checkout: self
+
           - task: Bash@3
             displayName: Build and Push DEV Database Image
             inputs:
               targetType: inline
               script: |
                 set -euo pipefail
+
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 REPOSITORY="$(ECR_REPOSITORY_PREFIX)-dev-db"
                 COMMIT_ID="$(git rev-parse --short HEAD)"
                 TAG="DEV-${COMMIT_ID}"
                 IMAGE_REF="${REGISTRY}/${REPOSITORY}:${TAG}"
-                test -f ./db/Dockerfile || { echo "ERROR: ./db/Dockerfile not found"; exit 1; }
+
+                test -f ./db/Dockerfile || {
+                  echo "ERROR: ./db/Dockerfile not found"
+                  exit 1
+                }
+
                 aws sts get-caller-identity
-                aws ecr describe-repositories --repository-names "${REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+
+                aws ecr describe-repositories \
+                  --repository-names "${REPOSITORY}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr get-login-password \
+                  --region "${AWS_DEFAULT_REGION}" |
+                  docker login --username AWS --password-stdin "${REGISTRY}"
+
                 docker build -f ./db/Dockerfile -t "${IMAGE_REF}" ./db
                 docker push "${IMAGE_REF}"
-                aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${TAG}" --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr describe-images \
+                  --repository-name "${REPOSITORY}" \
+                  --image-ids "imageTag=${TAG}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
                 echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]${TAG}"
                 echo "Built and pushed: ${IMAGE_REF}"
+
   - stage: PromoteQA
     displayName: 'Promote DEV Image to QA'
     condition: and(not(canceled()), in('${{ parameters.DEPLOY_ENV }}', 'qa', 'uat', 'prod'))
@@ -62,27 +87,52 @@ stages:
               targetType: inline
               script: |
                 set -euo pipefail
+
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 PREFIX="$(ECR_REPOSITORY_PREFIX)"
                 SOURCE_TAG="${SOURCE_TAG_INPUT}"
+
                 if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
                   echo "ERROR: Enter an existing DEV image tag, for example DEV-b625074."
                   exit 1
                 fi
+
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
                 TARGET_TAG="QA-${COMMIT_ID}"
                 SOURCE_REPOSITORY="${PREFIX}-dev-db"
                 TARGET_REPOSITORY="${PREFIX}-qa-db"
+
                 aws sts get-caller-identity
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
-                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG}" --region "${AWS_DEFAULT_REGION}"
-                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr get-login-password \
+                  --region "${AWS_DEFAULT_REGION}" |
+                  docker login --username AWS --password-stdin "${REGISTRY}"
+
+                aws ecr describe-images \
+                  --repository-name "${SOURCE_REPOSITORY}" \
+                  --image-ids "imageTag=${SOURCE_TAG}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr describe-repositories \
+                  --repository-names "${TARGET_REPOSITORY}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                docker tag \
+                  "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}" \
+                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
                 docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr describe-images \
+                  --repository-name "${TARGET_REPOSITORY}" \
+                  --image-ids "imageTag=${TARGET_TAG}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
                 echo "Promoted to QA: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
   - stage: PromoteUAT
     displayName: 'Promote QA Image to UAT'
     dependsOn: PromoteQA
@@ -98,28 +148,53 @@ stages:
               targetType: inline
               script: |
                 set -euo pipefail
+
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 PREFIX="$(ECR_REPOSITORY_PREFIX)"
                 SOURCE_TAG="${SOURCE_TAG_INPUT}"
+
                 if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
                   echo "ERROR: Enter an existing DEV image tag, for example DEV-b625074."
                   exit 1
                 fi
+
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
                 SOURCE_TAG_QA="QA-${COMMIT_ID}"
                 TARGET_TAG="UAT-${COMMIT_ID}"
                 SOURCE_REPOSITORY="${PREFIX}-qa-db"
                 TARGET_REPOSITORY="${PREFIX}-uat-db"
+
                 aws sts get-caller-identity
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
-                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG_QA}" --region "${AWS_DEFAULT_REGION}"
-                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr get-login-password \
+                  --region "${AWS_DEFAULT_REGION}" |
+                  docker login --username AWS --password-stdin "${REGISTRY}"
+
+                aws ecr describe-images \
+                  --repository-name "${SOURCE_REPOSITORY}" \
+                  --image-ids "imageTag=${SOURCE_TAG_QA}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr describe-repositories \
+                  --repository-names "${TARGET_REPOSITORY}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                docker tag \
+                  "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}" \
+                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
                 docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr describe-images \
+                  --repository-name "${TARGET_REPOSITORY}" \
+                  --image-ids "imageTag=${TARGET_TAG}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
                 echo "Promoted to UAT: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
   - stage: ProductionApproval
     displayName: 'PROD - Manual Approval'
     dependsOn: PromoteUAT
@@ -141,6 +216,7 @@ stages:
                 The same image has been promoted to QA and UAT.
                 Approve to promote it to PROD.
               onTimeout: reject
+
   - stage: PromotePROD
     displayName: 'Promote UAT Image to PROD'
     dependsOn: ProductionApproval
@@ -156,28 +232,53 @@ stages:
               targetType: inline
               script: |
                 set -euo pipefail
+
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 PREFIX="$(ECR_REPOSITORY_PREFIX)"
                 SOURCE_TAG="${SOURCE_TAG_INPUT}"
+
                 if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
                   echo "ERROR: Enter an existing DEV image tag, for example DEV-b625074."
                   exit 1
                 fi
+
                 COMMIT_ID="${SOURCE_TAG#DEV-}"
                 SOURCE_TAG_UAT="UAT-${COMMIT_ID}"
                 TARGET_TAG="PROD-${COMMIT_ID}"
                 SOURCE_REPOSITORY="${PREFIX}-uat-db"
                 TARGET_REPOSITORY="${PREFIX}-prod-db"
+
                 aws sts get-caller-identity
-                aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
-                aws ecr describe-images --repository-name "${SOURCE_REPOSITORY}" --image-ids "imageTag=${SOURCE_TAG_UAT}" --region "${AWS_DEFAULT_REGION}"
-                aws ecr describe-repositories --repository-names "${TARGET_REPOSITORY}" --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr get-login-password \
+                  --region "${AWS_DEFAULT_REGION}" |
+                  docker login --username AWS --password-stdin "${REGISTRY}"
+
+                aws ecr describe-images \
+                  --repository-name "${SOURCE_REPOSITORY}" \
+                  --image-ids "imageTag=${SOURCE_TAG_UAT}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr describe-repositories \
+                  --repository-names "${TARGET_REPOSITORY}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}"
-                docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
+                docker tag \
+                  "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}" \
+                  "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
                 docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
-                aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr describe-images \
+                  --repository-name "${TARGET_REPOSITORY}" \
+                  --image-ids "imageTag=${TARGET_TAG}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
                 echo "Promoted to PROD: ${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
   - stage: Deploy
     displayName: 'Deploy Database to Selected Environment'
     dependsOn:
@@ -200,6 +301,7 @@ stages:
       - job: DeployDatabase
         steps:
           - checkout: self
+
           - task: Bash@3
             displayName: Deploy Database with Promoted ECR Image
             env:
@@ -213,6 +315,7 @@ stages:
               targetType: inline
               script: |
                 set -euo pipefail
+
                 export AWS_DEFAULT_REGION="$(AWS_REGION)"
                 REGISTRY="$(ECR_REGISTRY)"
                 CHART="$(HELM_CHART_PATH)"
@@ -220,6 +323,7 @@ stages:
                 PREFIX="$(ECR_REPOSITORY_PREFIX)"
                 CLUSTER_PREFIX="$(EKS_CLUSTER_PREFIX)"
                 ENVIRONMENT="${SELECTED_ENV}"
+
                 case "${ENVIRONMENT}" in
                   dev)
                     NAMESPACE="dev"
@@ -231,10 +335,12 @@ stages:
                     ;;
                   qa|uat|prod)
                     SOURCE_TAG="${SOURCE_TAG_INPUT}"
+
                     if [[ ! "${SOURCE_TAG}" =~ ^DEV-[A-Za-z0-9._-]+$ ]]; then
                       echo "ERROR: Enter the original DEV image tag, for example DEV-b625074."
                       exit 1
                     fi
+
                     COMMIT_ID="${SOURCE_TAG#DEV-}"
                     NAMESPACE="${ENVIRONMENT}"
                     CLUSTER_NAME="${CLUSTER_PREFIX}-${ENVIRONMENT}-cluster"
@@ -247,33 +353,56 @@ stages:
                     exit 1
                     ;;
                 esac
+
                 IMAGE_REF="${REGISTRY}/${REPOSITORY}:${TAG}"
-                test -f "${VALUES_FILE}" || { echo "ERROR: Values file not found: ${VALUES_FILE}"; exit 1; }
-                : "${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in the Library variable group}"
-                : "${MYSQL_USER:?Set MYSQL_USER in the Library variable group}"
-                : "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in the Library variable group}"
-                : "${MYSQL_DATABASE:?Set MYSQL_DATABASE in the Library variable group}"
+
+                test -f "${VALUES_FILE}" || {
+                  echo "ERROR: Values file not found: ${VALUES_FILE}"
+                  exit 1
+                }
+
+                : "${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in the variable group}"
+                : "${MYSQL_USER:?Set MYSQL_USER in the variable group}"
+                : "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in the variable group}"
+                : "${MYSQL_DATABASE:?Set MYSQL_DATABASE in the variable group}"
+
                 aws sts get-caller-identity
-                aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${TAG}" --region "${AWS_DEFAULT_REGION}"
-                aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
+
+                aws ecr describe-images \
+                  --repository-name "${REPOSITORY}" \
+                  --image-ids "imageTag=${TAG}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
+                aws eks update-kubeconfig \
+                  --name "${CLUSTER_NAME}" \
+                  --region "${AWS_DEFAULT_REGION}"
+
                 kubectl get nodes
-                kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+                kubectl create namespace "${NAMESPACE}" \
+                  --dry-run=client -o yaml |
+                  kubectl apply -f -
+
                 helm lint "${CHART}" -f "${VALUES_FILE}"
+
                 SECRET_DIR="$(mktemp -d)"
                 trap 'rm -rf "${SECRET_DIR}"' EXIT
+
                 printf '%s' "${MYSQL_ROOT_PASSWORD}" > "${SECRET_DIR}/MYSQL_ROOT_PASSWORD"
                 printf '%s' "${MYSQL_USER}" > "${SECRET_DIR}/MYSQL_USER"
                 printf '%s' "${MYSQL_PASSWORD}" > "${SECRET_DIR}/MYSQL_PASSWORD"
                 printf '%s' "${MYSQL_DATABASE}" > "${SECRET_DIR}/MYSQL_DATABASE"
+
                 if ! helm upgrade --install "${RELEASE}" "${CHART}" \
                   --namespace "${NAMESPACE}" \
                   --create-namespace \
                   -f "${VALUES_FILE}" \
-                  --set-string mysql.image="${REGISTRY}/${REPOSITORY}" \
-                  --set-string mysql.tag="${TAG}" \
-                  --set mysql.enabled=true \
-                  --set frontend.enabled=false \
-                  --set backend.enabled=false \
+                  --set-string components.mysql.image="${REGISTRY}/${REPOSITORY}" \
+                  --set-string components.mysql.tag="${TAG}" \
+                  --set components.mysql.enabled=true \
+                  --set components.mysql.service.enabled=true \
+                  --set components.frontend.enabled=false \
+                  --set components.backend.enabled=false \
                   --set ingress.enabled=false \
                   --set configMap.enabled=true \
                   --set secret.enabled=true \
@@ -283,12 +412,17 @@ stages:
                   --set-file secret.stringData.MYSQL_PASSWORD="${SECRET_DIR}/MYSQL_PASSWORD" \
                   --set-file secret.stringData.MYSQL_DATABASE="${SECRET_DIR}/MYSQL_DATABASE" \
                   --wait --timeout 10m; then
+
                   echo "ERROR: Helm deployment failed. Collecting diagnostics..."
+
                   helm status "${RELEASE}" -n "${NAMESPACE}" || true
                   kubectl get pods,pvc,svc -n "${NAMESPACE}" -o wide || true
                   kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp | tail -40 || true
+
                   exit 1
                 fi
+
                 helm status "${RELEASE}" -n "${NAMESPACE}"
                 kubectl get pods,svc,pvc -n "${NAMESPACE}" -o wide
+
                 echo "Successfully deployed ${IMAGE_REF} to ${ENVIRONMENT}."
