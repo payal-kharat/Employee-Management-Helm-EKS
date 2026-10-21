@@ -60,6 +60,9 @@ components:
     image: ""
     tag: ""
     containerPort: 3306
+    persistence:
+      existingClaim: mysql-pvc
+      size: 2Gi
     service:
       enabled: true
       name: mysql
