@@ -52,6 +52,7 @@ stages:
 
                 docker build -f ./backend/Dockerfile -t "${IMAGE}" ./backend
                 docker push "${IMAGE}"
+
                 aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${TAG}" --region "${AWS_DEFAULT_REGION}"
                 echo "Built and pushed: ${IMAGE}"
 
@@ -90,7 +91,9 @@ stages:
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}"
                 docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
                 docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
                 aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+                echo "Promoted ${SOURCE_TAG} to ${TARGET_TAG}"
 
   - stage: PromoteUAT
     displayName: 'Promote QA Backend Image to UAT'
@@ -129,7 +132,9 @@ stages:
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}"
                 docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_QA}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
                 docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
                 aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+                echo "Promoted ${SOURCE_TAG_QA} to ${TARGET_TAG}"
 
   - stage: ProductionApproval
     displayName: 'PROD - Manual Approval'
@@ -189,7 +194,9 @@ stages:
                 docker pull "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}"
                 docker tag "${REGISTRY}/${SOURCE_REPOSITORY}:${SOURCE_TAG_UAT}" "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
                 docker push "${REGISTRY}/${TARGET_REPOSITORY}:${TARGET_TAG}"
+
                 aws ecr describe-images --repository-name "${TARGET_REPOSITORY}" --image-ids "imageTag=${TARGET_TAG}" --region "${AWS_DEFAULT_REGION}"
+                echo "Promoted ${SOURCE_TAG_UAT} to ${TARGET_TAG}"
 
   - stage: Deploy
     displayName: 'Deploy Backend to Selected Environment'
@@ -256,6 +263,12 @@ stages:
 
                 test -f "${VALUES_FILE}" || { echo "ERROR: Values file not found: ${VALUES_FILE}"; exit 1; }
 
+                if [[ "${ENVIRONMENT}" == "dev" ]]; then
+                  echo "Deploying DEV backend image: ${IMAGE}:${TAG}"
+                else
+                  echo "Deploying promoted backend image: ${IMAGE}:${TAG}"
+                fi
+
                 aws sts get-caller-identity
                 aws ecr describe-images --repository-name "${REPOSITORY}" --image-ids "imageTag=${TAG}" --region "${AWS_DEFAULT_REGION}"
                 aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_DEFAULT_REGION}"
@@ -268,11 +281,14 @@ stages:
                   --namespace "${NAMESPACE}" \
                   --create-namespace \
                   -f "${VALUES_FILE}" \
-                  --set frontend.enabled=false \
-                  --set backend.enabled=true \
-                  --set-string backend.image="${IMAGE}" \
-                  --set-string backend.tag="${TAG}" \
-                  --set mysql.enabled=false \
+                  --set components.frontend.enabled=false \
+                  --set components.frontend.service.enabled=false \
+                  --set components.backend.enabled=true \
+                  --set components.backend.service.enabled=true \
+                  --set-string components.backend.image="${IMAGE}" \
+                  --set-string components.backend.tag="${TAG}" \
+                  --set components.mysql.enabled=false \
+                  --set components.mysql.service.enabled=false \
                   --set ingress.enabled=false \
                   --set configMap.enabled=false \
                   --set secret.enabled=false \

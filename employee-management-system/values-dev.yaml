@@ -60,6 +60,9 @@ components:
     image: ""
     tag: ""
     containerPort: 3306
+    persistence:
+      existingClaim: mysql-pvc
+      size: 2Gi
     service:
       enabled: true
       name: mysql
@@ -118,4 +121,4 @@ ingress:
   className: alb
   scheme: internet-facing
   targetType: ip
-  host: employee.com
+  host: employee-dev.com
