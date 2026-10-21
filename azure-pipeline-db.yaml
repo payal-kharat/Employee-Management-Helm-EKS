@@ -323,11 +323,13 @@ stages:
                 PREFIX="$(ECR_REPOSITORY_PREFIX)"
                 CLUSTER_PREFIX="$(EKS_CLUSTER_PREFIX)"
                 ENVIRONMENT="${SELECTED_ENV}"
+                # All environments use the existing DEV EKS cluster; namespaces remain separate.
 
                 case "${ENVIRONMENT}" in
                   dev)
                     NAMESPACE="dev"
                     CLUSTER_NAME="${CLUSTER_PREFIX}-dev-cluster"
+                    STORAGE_CLASS_ENABLED="true"
                     REPOSITORY="${PREFIX}-dev-db"
                     VALUES_FILE="${CHART}/values-dev.yaml"
                     COMMIT_ID="$(git rev-parse --short HEAD)"
@@ -343,7 +345,8 @@ stages:
 
                     COMMIT_ID="${SOURCE_TAG#DEV-}"
                     NAMESPACE="${ENVIRONMENT}"
-                    CLUSTER_NAME="${CLUSTER_PREFIX}-${ENVIRONMENT}-cluster"
+                    CLUSTER_NAME="${CLUSTER_PREFIX}-dev-cluster"
+                    STORAGE_CLASS_ENABLED="false"
                     REPOSITORY="${PREFIX}-${ENVIRONMENT}-db"
                     VALUES_FILE="${CHART}/values-${ENVIRONMENT}.yaml"
                     TAG="$(echo "${ENVIRONMENT}" | tr '[:lower:]' '[:upper:]')-${COMMIT_ID}"
@@ -406,7 +409,7 @@ stages:
                   --set ingress.enabled=false \
                   --set configMap.enabled=true \
                   --set secret.enabled=true \
-                  --set storageClass.enabled=true \
+                  --set storageClass.enabled="${STORAGE_CLASS_ENABLED}" \
                   --set-file secret.stringData.MYSQL_ROOT_PASSWORD="${SECRET_DIR}/MYSQL_ROOT_PASSWORD" \
                   --set-file secret.stringData.MYSQL_USER="${SECRET_DIR}/MYSQL_USER" \
                   --set-file secret.stringData.MYSQL_PASSWORD="${SECRET_DIR}/MYSQL_PASSWORD" \
