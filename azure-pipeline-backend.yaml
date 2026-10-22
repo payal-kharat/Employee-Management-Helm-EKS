@@ -12,6 +12,7 @@ parameters:
       - qa
       - uat
       - prod
+
   - name: IMAGE_TAG
     displayName: Existing DEV Image Tag (Required for QA, UAT and PROD)
     type: string
@@ -31,6 +32,7 @@ stages:
       - job: BuildPushDev
         steps:
           - checkout: self
+
           - task: Bash@3
             displayName: Build and Push DEV Backend Image
             inputs:
@@ -63,6 +65,7 @@ stages:
       - job: PromoteToQA
         steps:
           - checkout: none
+
           - task: Bash@3
             displayName: Promote DEV Backend Image to QA ECR
             env:
@@ -103,6 +106,7 @@ stages:
       - job: PromoteToUAT
         steps:
           - checkout: none
+
           - task: Bash@3
             displayName: Promote QA Backend Image to UAT ECR
             env:
@@ -165,6 +169,7 @@ stages:
       - job: PromoteToPROD
         steps:
           - checkout: none
+
           - task: Bash@3
             displayName: Promote UAT Backend Image to PROD ECR
             env:
@@ -220,6 +225,7 @@ stages:
       - job: DeployBackend
         steps:
           - checkout: self
+
           - task: Bash@3
             displayName: Deploy Backend with Promoted ECR Image
             env:
@@ -257,7 +263,8 @@ stages:
                     ;;
                 esac
 
-                CLUSTER_NAME="${CLUSTER_PREFIX}-${ENVIRONMENT}-cluster"
+                # All environments use the shared DEV EKS cluster; namespaces stay separate.
+                CLUSTER_NAME="${CLUSTER_PREFIX}-dev-cluster"
                 VALUES_FILE="${CHART}/values-${ENVIRONMENT}.yaml"
                 IMAGE="${REGISTRY}/${REPOSITORY}"
 
