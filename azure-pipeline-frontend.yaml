@@ -270,7 +270,8 @@ stages:
                     ;;
                 esac
 
-                CLUSTER_NAME="${CLUSTER_PREFIX}-${ENVIRONMENT}-cluster"
+                # All environments use the shared DEV EKS cluster; namespaces stay separate.
+                CLUSTER_NAME="${CLUSTER_PREFIX}-dev-cluster"
                 VALUES_FILE="${CHART}/values-${ENVIRONMENT}.yaml"
                 IMAGE="${REGISTRY}/${REPOSITORY}"
 
